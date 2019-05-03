@@ -21,7 +21,7 @@ type jobPhase string
 
 const (
 	mapPhase    jobPhase = "mapPhase"
-	reducePhase          = "reducePhase"
+	reducePhase jobPhase = "reducePhase"
 )
 
 // KeyValue is a type used to hold the key/value pairs passed to the map and

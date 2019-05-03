@@ -18,7 +18,7 @@ type Master struct {
 	doneChannel chan bool
 
 	// protected by the mutex
-	newCond *sync.Cond // signals when Register() adds to workers[]
+	newCond *sync.Cond // signals when Register() adds to workers[]411111111111111111111111111111111111111111111
 	workers []string   // each worker's UNIX-domain socket name -- its RPC address
 
 	// Per-task information
