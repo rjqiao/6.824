@@ -1,0 +1,91 @@
+=== RUN   TestBasicAgree2B
+Test (2B): basic agreement ...
+2019/05/22 13:11:44 [DEBUG] Raft: [Id: 2 | Term: 0 | 0] election timeout! start election
+2019/05/22 13:11:44 [DEBUG] Raft: [Id: 4 | Term: 0 | 0] election timeout! start election
+2019/05/22 13:11:44 [DEBUG] Raft: [Id: 2 | Term: 1 | 1] doElection 3 - 4, start term 1
+2019/05/22 13:11:44 [DEBUG] Raft: [Id: 1 | Term: 0 | 0] election timeout! start election
+2019/05/22 13:11:44 [DEBUG] Raft: [Id: 2 | Term: 1 | 1] doElection 3 - 3, start term 1
+2019/05/22 13:11:44 [DEBUG] Raft: [Id: 4 | Term: 2 | 1] doElection 3 - 3, start term 2
+2019/05/22 13:11:44 [DEBUG] Raft: [Id: 2 | Term: 1 | 1] doElection 3 - 0, start term 1
+2019/05/22 13:11:44 [DEBUG] Raft: [Id: 4 | Term: 2 | 1] doElection 3 - 0, start term 2
+2019/05/22 13:11:44 [DEBUG] Raft: [Id: 4 | Term: 2 | 1] doElection 3 - 2, start term 2
+2019/05/22 13:11:44 [DEBUG] Raft: [Id: 2 | Term: 2 | 0] doElection 3 - 1, start term 1
+2019/05/22 13:11:44 [DEBUG] Raft: [Id: 1 | Term: 2 | 1] doElection 3 - 4, start term 2
+2019/05/22 13:11:44 [DEBUG] Raft: [Id: 4 | Term: 2 | 1] doElection 3 - 1, start term 2
+2019/05/22 13:11:44 [DEBUG] Raft: [Id: 1 | Term: 2 | 1] doElection 3 - 0, start term 2
+2019/05/22 13:11:44 [DEBUG] Raft: [Id: 1 | Term: 2 | 1] doElection 3 - 2, start term 2
+2019/05/22 13:11:44 [DEBUG] Raft: [Id: 1 | Term: 2 | 1] doElection 3 - 3, start term 2
+2019/05/22 13:11:44 [DEBUG] Raft: [Id: 2 | Term: 2 | 0] vote count: 2, start term: 1
+2019/05/22 13:11:44 [DEBUG] Raft: [Id: 4 | Term: 2 | 2] become leader
+2019/05/22 13:11:44 [DEBUG] Raft: [Id: 1 | Term: 2 | 2] become leader
+2019/05/22 13:11:45 [DEBUG] Raft: [Id: 4 | Term: 2 | 2] vote count: 4, start term: 2
+2019/05/22 13:11:45 [DEBUG] Raft: [Id: 1 | Term: 2 | 2] vote count: 4, start term: 2
+2019/05/22 13:11:45 [DEBUG] Raft: [Id: 4 | Term: 2 | 2] heartbeat daemon leader new loop
+2019/05/22 13:11:45 [DEBUG] Raft: [Id: 4 | Term: 2 | 2] Send AppendEntries: prevLogIndex: 0, heartbeat
+2019/05/22 13:11:45 [DEBUG] Raft: [Id: 1 | Term: 2 | 2] heartbeat daemon leader new loop
+2019/05/22 13:11:45 [DEBUG] Raft: [Id: 4 | Term: 2 | 2] Send AppendEntries: leaderCommit = 0
+2019/05/22 13:11:45 [DEBUG] Raft: [Id: 3 | Term: 2 | 0] AppendEntries: args.LeaderCommit = 0
+2019/05/22 13:11:45 [DEBUG] Raft: [Id: 1 | Term: 2 | 2] Send AppendEntries: prevLogIndex: 0, entryIndex last to send: 1
+2019/05/22 13:11:45 [DEBUG] Raft: [Id: 4 | Term: 2 | 2] Send AppendEntries: prevLogIndex: 0, heartbeat
+2019/05/22 13:11:45 [DEBUG] Raft: [Id: 1 | Term: 2 | 2] Send AppendEntries: leaderCommit = 0
+2019/05/22 13:11:45 [DEBUG] Raft: [Id: 4 | Term: 2 | 2] Send AppendEntries: leaderCommit = 0
+2019/05/22 13:11:45 [DEBUG] Raft: [Id: 0 | Term: 2 | 0] AppendEntries: args.LeaderCommit = 0
+2019/05/22 13:11:45 [DEBUG] Raft: [Id: 1 | Term: 2 | 2] Send AppendEntries: prevLogIndex: 0, entryIndex last to send: 1
+2019/05/22 13:11:45 [DEBUG] Raft: [Id: 4 | Term: 2 | 2] Send AppendEntries: prevLogIndex: 0, heartbeat
+2019/05/22 13:11:45 [DEBUG] Raft: [Id: 1 | Term: 2 | 2] Send AppendEntries: leaderCommit = 0
+2019/05/22 13:11:45 [DEBUG] Raft: [Id: 4 | Term: 2 | 2] Send AppendEntries: leaderCommit = 0
+2019/05/22 13:11:45 [DEBUG] Raft: [Id: 0 | Term: 2 | 0] AppendEntries: args.LeaderCommit = 0
+2019/05/22 13:11:45 [DEBUG] Raft: [Id: 1 | Term: 2 | 2] Send AppendEntries: prevLogIndex: 0, entryIndex last to send: 1
+2019/05/22 13:11:45 [DEBUG] Raft: [Id: 4 | Term: 2 | 2] Send AppendEntries: prevLogIndex: 0, heartbeat
+2019/05/22 13:11:45 [DEBUG] Raft: [Id: 2 | Term: 2 | 0] election timeout! start election
+2019/05/22 13:11:45 [DEBUG] Raft: [Id: 1 | Term: 2 | 2] Send AppendEntries: leaderCommit = 0
+2019/05/22 13:11:45 [DEBUG] Raft: [Id: 4 | Term: 2 | 2] Send AppendEntries: leaderCommit = 0
+2019/05/22 13:11:45 [DEBUG] Raft: [Id: 2 | Term: 3 | 1] doElection 3 - 0, start term 3
+2019/05/22 13:11:45 [DEBUG] Raft: [Id: 2 | Term: 3 | 1] doElection 3 - 3, start term 3
+2019/05/22 13:11:45 [DEBUG] Raft: [Id: 1 | Term: 3 | 0] Send AppendEntries: prevLogIndex: 0, entryIndex last to send: 1
+2019/05/22 13:11:45 [DEBUG] Raft: [Id: 2 | Term: 3 | 1] doElection 3 - 1, start term 3
+2019/05/22 13:11:45 [DEBUG] Raft: [Id: 2 | Term: 3 | 1] doElection 3 - 4, start term 3
+2019/05/22 13:11:45 [DEBUG] Raft: [Id: 1 | Term: 3 | 0] Send AppendEntries: leaderCommit = 0
+2019/05/22 13:11:45 [DEBUG] Raft: [Id: 2 | Term: 3 | 1] vote count: 2, start term: 3
+2019/05/22 13:11:45 [DEBUG] Raft: [Id: 3 | Term: 3 | 0] AppendEntries: args.LeaderCommit = 0
+2019/05/22 13:11:46 [DEBUG] Raft: [Id: 0 | Term: 3 | 0] election timeout! start election
+2019/05/22 13:11:46 [DEBUG] Raft: [Id: 0 | Term: 4 | 1] doElection 3 - 4, start term 4
+2019/05/22 13:11:46 [DEBUG] Raft: [Id: 1 | Term: 3 | 0] election timeout! start election
+2019/05/22 13:11:46 [DEBUG] Raft: [Id: 0 | Term: 4 | 1] doElection 3 - 1, start term 4
+2019/05/22 13:11:46 [DEBUG] Raft: [Id: 0 | Term: 4 | 1] doElection 3 - 2, start term 4
+2019/05/22 13:11:46 [DEBUG] Raft: [Id: 0 | Term: 4 | 1] doElection 3 - 3, start term 4
+2019/05/22 13:11:46 [DEBUG] Raft: [Id: 1 | Term: 5 | 1] doElection 3 - 4, start term 5
+2019/05/22 13:11:46 [DEBUG] Raft: [Id: 1 | Term: 5 | 1] doElection 3 - 0, start term 5
+2019/05/22 13:11:46 [DEBUG] Raft: [Id: 1 | Term: 5 | 1] doElection 3 - 2, start term 5
+2019/05/22 13:11:46 [DEBUG] Raft: [Id: 1 | Term: 5 | 1] doElection 3 - 3, start term 5
+2019/05/22 13:11:46 [DEBUG] Raft: [Id: 0 | Term: 5 | 0] vote count: 2, start term: 4
+2019/05/22 13:11:46 [DEBUG] Raft: [Id: 1 | Term: 5 | 2] become leader
+2019/05/22 13:11:46 [DEBUG] Raft: [Id: 1 | Term: 5 | 2] vote count: 3, start term: 5
+2019/05/22 13:11:47 [DEBUG] Raft: [Id: 2 | Term: 5 | 0] election timeout! start election
+2019/05/22 13:11:47 [DEBUG] Raft: [Id: 2 | Term: 6 | 1] doElection 3 - 4, start term 6
+2019/05/22 13:11:47 [DEBUG] Raft: [Id: 0 | Term: 5 | 0] election timeout! start election
+2019/05/22 13:11:47 [DEBUG] Raft: [Id: 2 | Term: 6 | 1] doElection 3 - 0, start term 6
+2019/05/22 13:11:47 [DEBUG] Raft: [Id: 2 | Term: 6 | 1] doElection 3 - 1, start term 6
+2019/05/22 13:11:47 [DEBUG] Raft: [Id: 2 | Term: 6 | 1] doElection 3 - 3, start term 6
+2019/05/22 13:11:47 [DEBUG] Raft: [Id: 0 | Term: 7 | 1] doElection 3 - 4, start term 7
+2019/05/22 13:11:47 [DEBUG] Raft: [Id: 1 | Term: 6 | 0] election timeout! start election
+2019/05/22 13:11:47 [DEBUG] Raft: [Id: 0 | Term: 7 | 1] doElection 3 - 1, start term 7
+2019/05/22 13:11:47 [DEBUG] Raft: [Id: 0 | Term: 7 | 1] doElection 3 - 2, start term 7
+2019/05/22 13:11:47 [DEBUG] Raft: [Id: 0 | Term: 7 | 1] doElection 3 - 3, start term 7
+2019/05/22 13:11:47 [DEBUG] Raft: [Id: 3 | Term: 7 | 0] election timeout! start election
+2019/05/22 13:11:47 [DEBUG] Raft: [Id: 2 | Term: 7 | 0] vote count: 2, start term: 6
+2019/05/22 13:11:47 [DEBUG] Raft: [Id: 1 | Term: 8 | 1] doElection 3 - 4, start term 8
+2019/05/22 13:11:47 [DEBUG] Raft: [Id: 1 | Term: 8 | 1] doElection 3 - 0, start term 8
+2019/05/22 13:11:47 [DEBUG] Raft: [Id: 1 | Term: 8 | 1] doElection 3 - 3, start term 8
+2019/05/22 13:11:47 [DEBUG] Raft: [Id: 0 | Term: 8 | 0] vote count: 2, start term: 7
+2019/05/22 13:11:47 [DEBUG] Raft: [Id: 3 | Term: 9 | 1] doElection 3 - 4, start term 9
+2019/05/22 13:11:47 [DEBUG] Raft: [Id: 1 | Term: 8 | 1] doElection 3 - 2, start term 8
+2019/05/22 13:11:47 [DEBUG] Raft: [Id: 3 | Term: 9 | 1] doElection 3 - 1, start term 9
+2019/05/22 13:11:47 [DEBUG] Raft: [Id: 3 | Term: 9 | 1] doElection 3 - 2, start term 9
+2019/05/22 13:11:47 [DEBUG] Raft: [Id: 3 | Term: 9 | 1] doElection 3 - 0, start term 9
+2019/05/22 13:11:47 [DEBUG] Raft: [Id: 1 | Term: 9 | 0] vote count: 1, start term: 8
+2019/05/22 13:11:47 [DEBUG] Raft: [Id: 3 | Term: 9 | 2] become leader
+2019/05/22 13:11:47 [DEBUG] Raft: [Id: 3 | Term: 9 | 2] vote count: 3, start term: 9
+--- FAIL: TestBasicAgree2B (3.47s)
+    config.go:465: one(100) failed to reach agreement
+FAIL

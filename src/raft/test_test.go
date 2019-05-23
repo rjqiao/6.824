@@ -23,7 +23,7 @@ import "sync"
 const RaftElectionTimeout = 1000 * time.Millisecond
 
 func TestInitialElection2A(t *testing.T) {
-	servers := 3
+	servers := 5
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
 
@@ -310,28 +310,37 @@ func TestRejoin2B(t *testing.T) {
 	// leader network failure
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect(leader1)
+	log.Printf("disconnect leader1: %d", leader1)
 
 	// make old leader try to agree on some entries
+	log.Printf("push 3 commands to old leader 102 103 104",)
 	cfg.rafts[leader1].Start(102)
 	cfg.rafts[leader1].Start(103)
 	cfg.rafts[leader1].Start(104)
 
 	// new leader commits, also for index=2
+	log.Printf("add 1 command 103")
 	cfg.one(103, 2, true)
 
 	// new leader network failure
 	leader2 := cfg.checkOneLeader()
 	cfg.disconnect(leader2)
+	log.Printf("disconnect leader2: %d",leader2)
 
 	// old leader connected again
 	cfg.connect(leader1)
+	log.Printf("reconnect leader1: %d", leader1)
 
 	cfg.one(104, 2, true)
+	log.Printf("add 1 command 104")
+
 
 	// all together now
 	cfg.connect(leader2)
+	log.Printf("reconnect leader2: %d", leader2)
 
 	cfg.one(105, servers, true)
+	log.Printf("add 1 command 105")
 
 	cfg.end()
 }
@@ -343,29 +352,37 @@ func TestBackup2B(t *testing.T) {
 
 	cfg.begin("Test (2B): leader backs up quickly over incorrect follower logs")
 
+	log.Printf("Add 1 command")
 	cfg.one(rand.Int(), servers, true)
 
 	// put leader and one follower in a partition
 	leader1 := cfg.checkOneLeader()
+	log.Printf("leader1: %d",leader1)
+
+	log.Printf("Disconnect 3 followers")
 	cfg.disconnect((leader1 + 2) % servers)
 	cfg.disconnect((leader1 + 3) % servers)
 	cfg.disconnect((leader1 + 4) % servers)
 
 	// submit lots of commands that won't commit
+	log.Printf("Add 50 to old leader (%d). would not commit", leader1)
 	for i := 0; i < 50; i++ {
 		cfg.rafts[leader1].Start(rand.Int())
 	}
 
 	time.Sleep(RaftElectionTimeout / 2)
 
+	log.Printf("Disconnect leader1 and follower")
 	cfg.disconnect((leader1 + 0) % servers)
 	cfg.disconnect((leader1 + 1) % servers)
 
+	log.Printf("Reconnect followers")
 	// allow other partition to recover
 	cfg.connect((leader1 + 2) % servers)
 	cfg.connect((leader1 + 3) % servers)
 	cfg.connect((leader1 + 4) % servers)
 
+	log.Printf("Add 50 commands. Success")
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3, true)
@@ -373,12 +390,15 @@ func TestBackup2B(t *testing.T) {
 
 	// now another partitioned leader and one follower
 	leader2 := cfg.checkOneLeader()
+	log.Printf("leader2: %d", leader2)
 	other := (leader1 + 2) % servers
 	if leader2 == other {
 		other = (leader2 + 1) % servers
 	}
+	log.Printf("Disconnect a non-leader1-leader2 follower: %d", other)
 	cfg.disconnect(other)
 
+	log.Printf("Add 50 commands to leader2. Would not commit")
 	// lots more commands that won't commit
 	for i := 0; i < 50; i++ {
 		cfg.rafts[leader2].Start(rand.Int())
@@ -386,6 +406,7 @@ func TestBackup2B(t *testing.T) {
 
 	time.Sleep(RaftElectionTimeout / 2)
 
+	log.Printf("leader1 and 2 followers back to live, other disconnected")
 	// bring original leader back to life,
 	for i := 0; i < servers; i++ {
 		cfg.disconnect(i)
@@ -394,15 +415,19 @@ func TestBackup2B(t *testing.T) {
 	cfg.connect((leader1 + 1) % servers)
 	cfg.connect(other)
 
+	log.Printf("Add 50 commands to group leader1")
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3, true)
 	}
 
+	log.Printf("Connect everyone")
 	// now everyone
 	for i := 0; i < servers; i++ {
 		cfg.connect(i)
 	}
+
+	log.Printf("Add 1 command")
 	cfg.one(rand.Int(), servers, true)
 
 	cfg.end()
