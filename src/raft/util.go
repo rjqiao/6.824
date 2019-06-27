@@ -89,7 +89,7 @@ func MaxInt(x, y int) int {
 
 func MinInt(x, y int) int {
 	if x < y {
-		return y
+		return x
 	}
-	return x
+	return y
 }
