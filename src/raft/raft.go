@@ -159,7 +159,7 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term         int
 	Success      bool
-	SuggestIndex int
+	SuggestIndex int // next try for PrevLogIndex
 	SuggestTerm  int
 	ConflictTerm int
 }
@@ -210,7 +210,6 @@ func (rf *Raft) promoteToLeader() {
 
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
-	//rf.sendAppendChan = make([]chan struct{}, len(rf.peers))
 
 	for i := range rf.peers {
 		if i != rf.me {
@@ -221,7 +220,7 @@ func (rf *Raft) promoteToLeader() {
 	go rf.heartbeatDaemonProcess()
 }
 
-func (rf *Raft) setCommitIndex(commitIndex int) {
+func (rf *Raft) setCommitIndexAndApplyStateMachine(commitIndex int) {
 	rf.commitIndex = commitIndex;
 	go rf.applyLocalStateMachine()
 }
@@ -255,8 +254,10 @@ func (rf *Raft) getLastTerm() int {
 	return rf.logs[len(rf.logs)-1].Term
 }
 
-// lock outside
+// lock outside, call with go
 // 什么改变时候会updateCommitIndex呢
+// modify rf.commitIndex
+// send to rf.applyCh
 func (rf *Raft) updateCommitIndex() {
 	index := len(rf.logs)
 	oldCommitIndex := rf.commitIndex
@@ -271,7 +272,7 @@ func (rf *Raft) updateCommitIndex() {
 		if count*2 > len(rf.peers) {
 			// 必须是一个当前term的、成为majority的log
 			if entry.Term >= rf.currentTerm {
-				rf.setCommitIndex(entry.Index)
+				rf.setCommitIndexAndApplyStateMachine(entry.Index)
 			}
 			break
 		}
@@ -279,6 +280,7 @@ func (rf *Raft) updateCommitIndex() {
 	}
 }
 
+// send to rf.applyCh
 func (rf *Raft) applyLocalStateMachine() {
 	rf.mu.Lock()
 	if rf.commitIndex > 0 && rf.commitIndex > rf.lastApplied {
@@ -297,6 +299,122 @@ func (rf *Raft) applyLocalStateMachine() {
 	} else {
 		rf.mu.Unlock()
 	}
+}
+
+func (rf *Raft) updateLogAndCommitIndexWhenReceivingAppendEntriesSuccess(Entries []LogEntry, PrevLogIndex int, LeaderCommit int) {
+	if len(Entries) != 0 {
+		lastValidIndex := PrevLogIndex
+		for lastValidIndex+1 <= MinInt(Entries[len(Entries)-1].Index, rf.getLastIndex()) &&
+			rf.getTermForIndex(lastValidIndex+1) == Entries[lastValidIndex-PrevLogIndex].Term {
+			lastValidIndex++
+		}
+		rf.logs = rf.logs[:lastValidIndex]
+		rf.logs = append(rf.logs, Entries[lastValidIndex-PrevLogIndex:]...)
+	}
+
+	// update commitIndex
+	// assert args.LeaderCommit <= rf.getLastEntryIndex()
+	rf.setCommitIndexAndApplyStateMachine(MaxInt(LeaderCommit, rf.commitIndex))
+}
+
+// lock outside
+// no side effect
+func (rf *Raft) buildAppendEntriesReplyWhenNotSuccess(reply *AppendEntriesReply, PrevLogIndex int, PrevLogTerm int) {
+	if PrevLogIndex > rf.getLastIndex() {
+		reply.ConflictTerm = -1
+		reply.SuggestIndex = rf.getLastIndex()
+		reply.SuggestTerm = rf.getLastTerm()
+	} else {
+		reply.ConflictTerm = rf.getTermForIndex(PrevLogIndex)
+		if reply.ConflictTerm > PrevLogTerm {
+			// suggestTerm = the max index ( <= PrevLogTerm )
+			reply.SuggestIndex = PrevLogIndex
+			for ; reply.SuggestIndex >= 1 && rf.getTermForIndex(reply.SuggestIndex) > PrevLogTerm; reply.SuggestIndex-- {
+			}
+			reply.SuggestTerm = rf.getTermForIndex(reply.SuggestIndex) // term 0 if index 0
+		} else {
+			// assert reply.ConflictTerm < args.PrevLogTerm
+			reply.SuggestIndex = PrevLogIndex - 1
+			reply.SuggestTerm = rf.getTermForIndex(reply.SuggestIndex) // term 0 if index 0
+		}
+	}
+}
+
+// lock inside
+// no side effect
+func (rf *Raft) buildAppendEntriesArgs(server int) *AppendEntriesArgs {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	prevLogIndex := 0
+	prevLogTerm := 0
+	var entries []LogEntry
+	leaderCommit := rf.commitIndex
+
+	// assert nextIndex[server]>=1  因为index 0的entry不存在
+	// rf.getLastIndex >= 0
+	if rf.nextIndex[server] > rf.getLastIndex() {
+		entries = make([]LogEntry, 0)
+		prevLogIndex = rf.getLastIndex()
+		prevLogTerm = rf.getLastTerm()
+	} else {
+		entries = rf.logs[(rf.nextIndex[server] - 1):]
+		prevLogIndex = rf.nextIndex[server] - 1
+		// assert rf.nextIndex[server] >= 1
+		if rf.nextIndex[server] <= 1 {
+			prevLogTerm = 0
+		} else {
+			prevLogTerm = rf.logs[(rf.nextIndex[server] - 2)].Term
+		}
+	}
+
+	return &AppendEntriesArgs{
+		Term:         rf.currentTerm,
+		LeaderId:     rf.me,
+		PrevLogIndex: prevLogIndex,
+		PrevLogTerm:  prevLogTerm,
+		Entries:      entries,
+		LeaderCommit: leaderCommit,
+	}
+}
+
+// lock outside
+// side effect
+func (rf *Raft) updateNextIndexWhenAppendEntriesFail(server int, reply *AppendEntriesReply) {
+	//lastTryIndex := rf.nextIndex[server]
+	nextPrevLogIndex := 1
+	if rf.getTermForIndex(reply.SuggestIndex) == reply.SuggestTerm {
+		// including index==0 && term==0
+		nextPrevLogIndex = reply.SuggestIndex
+	} else if rf.getTermForIndex(reply.SuggestIndex) > reply.SuggestTerm {
+		npi := reply.SuggestIndex
+		for ; npi >= 1 && rf.getTermForIndex(npi) > reply.SuggestTerm; npi-- {
+		}
+		// side effect
+		nextPrevLogIndex = npi
+	} else {
+		// assert reply.SuggestIndex >= 1
+		// side effect
+		nextPrevLogIndex = reply.SuggestIndex - 1
+	}
+
+	// side effect
+	rf.nextIndex[server] = nextPrevLogIndex + 1
+	// assert 1 <= rf.nextIndex[server] <= rf.getLastIndex() + 1
+
+	// not needed
+	//rf.nextIndex[server] = MaxInt(MinInt(rf.nextIndex[server], lastTryIndex-1), 1)
+}
+
+// side effect
+// 更新nextIndex, matchIndex, updatecommitIndex
+// send to applyCh
+// lock outside
+func (rf *Raft) updateIndexesAndApplyWhenSuccess(server int) {
+	rf.nextIndex[server] = rf.getLastIndex() + 1
+	rf.matchIndex[server] = rf.getLastIndex()
+	rf.updateCommitIndex()
+	RaftDebug("Send AppendEntries to %d ++: new matchIndex = %d, commitIndex = %d", rf, server, rf.matchIndex[server], rf.commitIndex)
 }
 
 // ----------------------------------------------------------------
@@ -395,41 +513,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		(args.PrevLogIndex <= rf.getLastIndex() && args.PrevLogTerm == rf.getTermForIndex(args.PrevLogIndex)) {
 		// no conflict
 		reply.Success = true
-		if len(args.Entries) != 0 {
-			lastValidIndex := args.PrevLogIndex
-			for lastValidIndex+1 <= MinInt(args.Entries[len(args.Entries)-1].Index, rf.getLastIndex()) &&
-				rf.getTermForIndex(lastValidIndex+1) == args.Entries[lastValidIndex-args.PrevLogIndex].Term {
-				lastValidIndex++
-			}
-			rf.logs = rf.logs[:lastValidIndex]
-			rf.logs = append(rf.logs, args.Entries[lastValidIndex-args.PrevLogIndex:]...)
-		}
-
-		// update commitIndex
-		// assert args.LeaderCommit <= rf.getLastEntryIndex()
-		rf.setCommitIndex(MaxInt(args.LeaderCommit, rf.commitIndex))
+		rf.updateLogAndCommitIndexWhenReceivingAppendEntriesSuccess(args.Entries, args.PrevLogIndex, args.LeaderCommit)
 	} else {
 		// assert PrevLogIndex >= 1 && PrevLogTerm >= 1
 		reply.Success = false
-
-		if args.PrevLogIndex > rf.getLastIndex() {
-			reply.ConflictTerm = -1
-			reply.SuggestIndex = rf.getLastIndex()
-			reply.SuggestTerm = rf.getLastTerm()
-		} else {
-			reply.ConflictTerm = rf.getTermForIndex(args.PrevLogIndex)
-			if reply.ConflictTerm > args.PrevLogTerm {
-				// suggestTerm = the max index ( <= PrevLogTerm )
-				reply.SuggestIndex = args.PrevLogIndex
-				for ; reply.SuggestIndex >= 1 && rf.getTermForIndex(reply.SuggestIndex) > args.PrevLogTerm; reply.SuggestIndex-- {
-				}
-				reply.SuggestTerm = rf.getTermForIndex(reply.SuggestIndex) // term 0 if index 0
-			} else {
-				// reply.ConflictTerm < args.PrevLogTerm
-				reply.SuggestIndex = args.PrevLogIndex - 1
-				reply.SuggestTerm = rf.getTermForIndex(reply.SuggestIndex) // term 0 if index 0
-			}
-		}
+		rf.buildAppendEntriesReplyWhenNotSuccess(reply, args.PrevLogIndex, args.PrevLogTerm)
 	}
 	return
 }
@@ -443,47 +531,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 }
 
 func (rf *Raft) sendAndCollectAppendEntries(server int) bool {
-	rf.mu.Lock()
-
-	prevLogIndex := 0
-	prevLogTerm := 0
-	var entries []LogEntry
-	leaderCommit := rf.commitIndex
-
-	//assert nextIndex[server]>=1  因为index 0的entry不存在
-	// rf.getLastIndex >= 0
-	if rf.nextIndex[server] > rf.getLastIndex() {
-		entries = make([]LogEntry, 0)
-		prevLogIndex = rf.getLastIndex()
-		prevLogTerm = rf.getLastTerm()
-	} else {
-		// 需要
-		entries = rf.logs[(rf.nextIndex[server] - 1):]
-		prevLogIndex = rf.nextIndex[server] - 1
-		// assert rf.nextIndex[server] >= 1
-		if rf.nextIndex[server] <= 1 {
-			prevLogTerm = 0
-		} else {
-			prevLogTerm = rf.logs[(rf.nextIndex[server] - 2)].Term
-		}
-	}
-
-	args := &AppendEntriesArgs{
-		Term:         rf.currentTerm,
-		LeaderId:     rf.me,
-		PrevLogIndex: prevLogIndex,
-		PrevLogTerm:  prevLogTerm,
-		Entries:      entries,
-		LeaderCommit: leaderCommit,
-	}
-	rf.mu.Unlock()
-
-	if len(entries) == 0 {
-		RaftDebug("Send AppendEntries to %d: prevLogIndex: %d, heartbeat", rf, server, prevLogIndex)
-	} else {
-		RaftDebug("Send AppendEntries to %d: prevLogIndex: %d, entryIndex last to send: %d", rf, server, prevLogIndex, entries[len(entries)-1].Index)
-	}
-	RaftDebug("Send AppendEntries to %d --: leaderCommit = %d", rf, server, leaderCommit)
+	args := rf.buildAppendEntriesArgs(server) // lock inside
 
 	reply := &AppendEntriesReply{}
 	ok := rf.sendAppendEntries(server, args, reply)
@@ -508,29 +556,13 @@ func (rf *Raft) sendAndCollectAppendEntries(server int) bool {
 	}
 
 	//RaftDebug("append entries reply success? %v, reply term %d, from server %d", rf, reply.Success, reply.Term, server)
+
+	// side effect
 	if reply.Success {
 		// todo: if entries是空 -- 这里是为什么是todo？
-		// 更新nextIndex, matchIndex, updatecommitIndex
-		rf.nextIndex[server] = rf.getLastIndex() + 1
-		rf.matchIndex[server] = rf.getLastIndex()
-		rf.updateCommitIndex()
-
-		RaftDebug("Send AppendEntries to %d ++: new matchIndex = %d, commitIndex = %d", rf, server, rf.matchIndex[server], rf.commitIndex)
+		rf.updateIndexesAndApplyWhenSuccess(server)
 	} else {
-		lastTryIndex := rf.nextIndex[server]
-		if rf.getTermForIndex(reply.SuggestIndex) == reply.SuggestTerm {
-			// including index==0 && term==0
-			rf.nextIndex[server] = reply.SuggestIndex
-		} else if rf.getTermForIndex(reply.SuggestIndex) > reply.SuggestTerm {
-			ni := reply.SuggestIndex
-			for ; ni >= 1 && rf.getTermForIndex(ni) > reply.SuggestTerm; ni-- {
-			}
-			rf.nextIndex[server] = ni
-		} else {
-			// assert reply.SuggestIndex >= 1
-			rf.nextIndex[server] = reply.SuggestIndex - 1
-		}
-		rf.nextIndex[server] = MaxInt(MinInt(rf.nextIndex[server], lastTryIndex-1), 1)
+		rf.updateNextIndexWhenAppendEntriesFail(server, reply)
 	}
 	return ok
 }
