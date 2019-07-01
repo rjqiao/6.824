@@ -22,6 +22,12 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
+func RaftForcePrint(format string, rf *Raft, a ...interface{}) (n int, err error) {
+	args := append([]interface{}{rf.me, rf.currentTerm, rf.status}, a...)
+	log.Printf("[Force] Raft: [Id: %d | Term: %d | %v] "+format, args...)
+	return
+}
+
 func RaftInfo(format string, rf *Raft, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
 		args := append([]interface{}{rf.me, rf.currentTerm, rf.status}, a...)
@@ -43,16 +49,14 @@ func sendRPCRequest(requestName string, requestBlock func() bool) bool {
 	exit := make(chan bool, 1)
 
 	go func() {
-		ch <- requestBlock()
-
 		select {
+		case ch <- requestBlock():
 		case <-exit:
 			return
-		default:
-
 		}
 		// within timeout
 
+		return
 	}()
 
 	select {

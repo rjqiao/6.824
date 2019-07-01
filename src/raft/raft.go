@@ -18,6 +18,8 @@ package raft
 //
 
 import (
+	"bytes"
+	"encoding/gob"
 	"math/rand"
 	"sync"
 	"time"
@@ -91,6 +93,13 @@ type LogEntry struct {
 	Command interface{}
 }
 
+// RaftPersistence is persisted to the `persister`, and contains all necessary data to restart a failed node
+type RaftPersistence struct {
+	CurrentTerm int
+	Logs        []LogEntry
+	VotedFor    int
+}
+
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -123,6 +132,17 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+
+	buf := new(bytes.Buffer)
+	_ = gob.NewEncoder(buf).Encode(
+		RaftPersistence{
+			CurrentTerm: rf.currentTerm,
+			Logs:        rf.logs,
+			VotedFor:    rf.votedFor,
+		})
+
+	RaftDebug("Persisting node data (%d bytes)", rf, buf.Len())
+	rf.persister.SaveRaftState(buf.Bytes())
 }
 
 //
@@ -145,6 +165,14 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+
+	r := bytes.NewBuffer(data)
+	d := gob.NewDecoder(r)
+	obj := RaftPersistence{}
+	_ = d.Decode(&obj)
+
+	rf.votedFor, rf.currentTerm, rf.logs = obj.VotedFor, obj.CurrentTerm, obj.Logs
+	RaftInfo("Loaded persisted node data (%d bytes). Last applied index: %d", rf, len(data), rf.lastApplied)
 }
 
 type AppendEntriesArgs struct {
@@ -273,8 +301,8 @@ func (rf *Raft) updateCommitIndex() {
 			// 必须是一个当前term的、成为majority的log
 			if entry.Term >= rf.currentTerm {
 				rf.setCommitIndexAndApplyStateMachine(entry.Index)
+				break
 			}
-			break
 		}
 		index--
 	}
@@ -308,12 +336,15 @@ func (rf *Raft) updateLogAndCommitIndexWhenReceivingAppendEntriesSuccess(Entries
 			rf.getTermForIndex(lastValidIndex+1) == Entries[lastValidIndex-PrevLogIndex].Term {
 			lastValidIndex++
 		}
-		rf.logs = rf.logs[:lastValidIndex]
-		rf.logs = append(rf.logs, Entries[lastValidIndex-PrevLogIndex:]...)
+		rf.logs = append(rf.logs[:lastValidIndex], Entries[lastValidIndex-PrevLogIndex:]...)
+		//rf.persist()
 	}
 
 	// update commitIndex
 	// assert args.LeaderCommit <= rf.getLastEntryIndex()
+	// assert LeaderCommit >= rf.commitIndex
+
+	// can be old message? without MaxInt
 	rf.setCommitIndexAndApplyStateMachine(MaxInt(LeaderCommit, rf.commitIndex))
 }
 
@@ -448,6 +479,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 		reply.Term = args.Term
 	}
+
+	rf.persist()
 }
 
 //
@@ -482,7 +515,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	requestBlock := func() bool { return rf.peers[server].Call("Raft.RequestVote", args, reply) }
-	ok := sendRPCRequest("Raft,RequestVote", requestBlock)
+	ok := sendRPCRequest("Raft.RequestVote", requestBlock)
 	return ok
 }
 
@@ -519,7 +552,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		rf.buildAppendEntriesReplyWhenNotSuccess(reply, args.PrevLogIndex, args.PrevLogTerm)
 	}
-	return
+	rf.persist()
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -552,6 +585,7 @@ func (rf *Raft) sendAndCollectAppendEntries(server int) bool {
 
 	if reply.Term > rf.currentTerm {
 		rf.transitionToFollower(reply.Term)
+		rf.persist()
 		return ok
 	}
 
@@ -564,6 +598,7 @@ func (rf *Raft) sendAndCollectAppendEntries(server int) bool {
 	} else {
 		rf.updateNextIndexWhenAppendEntriesFail(server, reply)
 	}
+
 	return ok
 }
 
@@ -577,6 +612,7 @@ func (rf *Raft) sendAllAppendEntries() {
 			rf.mu.Unlock()
 		}
 	}
+	//rf.persist()
 }
 
 func (rf *Raft) heartbeatDaemonProcess() {
@@ -630,9 +666,10 @@ func (rf *Raft) doElection() {
 		LastLogIndex: rf.getLastIndex(),
 	}
 
+	rf.persist() // because transiting to Candidate, currentTerm++
 	rf.mu.Unlock()
 
-	voteCount := 1
+	var voteCount = 1
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
@@ -661,12 +698,14 @@ func (rf *Raft) doElection() {
 			// 其他人的term更加新
 			if reply.Term > rf.currentTerm {
 				rf.transitionToFollower(reply.Term)
+				rf.persist() // change term
 				return
 			}
 
 			// 确认consistent了
 			if reply.VoteGranted {
 				voteCount++
+				//atomic.AddInt32(&voteCount, 1)
 			}
 
 			if voteCount*2 > len(rf.peers) && args.Term == rf.currentTerm && rf.status == Candidate {
@@ -706,6 +745,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	index = rf.getLastIndex() + 1
 	rf.logs = append(rf.logs, LogEntry{Index: index, Term: term, Command: command})
+	rf.persist()
 	RaftInfo("New entry appended to leader's log: %v", rf, rf.logs[index-1])
 
 	return index, term, isLeader
