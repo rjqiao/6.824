@@ -244,7 +244,7 @@ func (rf *Raft) promoteToLeader() {
 	}
 
 	// append a ControlCommand LeaderBroadcast
-	//go rf.Start(LeaderBroadcast{})
+	//go rf.Start(LeaderBroadcastCommand{})
 
 	go rf.heartbeatDaemonProcess()
 }
@@ -321,10 +321,17 @@ func (rf *Raft) applyLocalStateMachine() {
 		copy(entries, rf.logs[rf.lastApplied:rf.commitIndex])
 		RaftInfo("Locally applying %d log entries. lastApplied: %d. commitIndex: %d",
 			rf, len(entries), rf.lastApplied, rf.commitIndex)
-
 		rf.mu.Unlock()
+
 		for _, log := range entries {
-			rf.applyChBuffer <- ApplyMsg{CommandValid: true, CommandIndex: log.Index, Command: log.Command}
+			msg := ApplyMsg{CommandValid: true, CommandIndex: log.Index, Command: log.Command}
+			switch log.Command.(type) {
+			case LeaderBroadcastCommand:
+				msg.CommandValid = false
+			default:
+			}
+
+			rf.applyChBuffer <- msg
 		}
 
 		rf.mu.Lock()
@@ -571,7 +578,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.transitionToFollower(args.Term)
 	}
 
-	RaftDebug("AppendEntries: args.LeaderCommit = %d", rf, args.LeaderCommit)
+	RaftDebug("AppendEntries: args.LeaderCommit = %v", rf, args.LeaderCommit)
 
 	reply.Term = rf.currentTerm
 
@@ -583,7 +590,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if len(args.Entries) != 0 {
 			lastCommand = args.Entries[len(args.Entries)-1].Command.(int)
 		}
-		RaftInfo("AppendEntries: args.LeaderCommit = %d, lastLogCommand: %d", rf, args.LeaderCommit, lastCommand)
+		RaftInfo("AppendEntries: args.LeaderCommit = %d, lastLogCommand: %v", rf, args.LeaderCommit, lastCommand)
 
 		// no conflict
 		reply.Success = true
@@ -796,7 +803,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	index = rf.getLastIndex() + 1
 	rf.logs = append(rf.logs, LogEntry{Index: index, Term: term, Command: command})
-	//rf.sendAllAppendEntries() // broadcast new log to followers
+	rf.sendAllAppendEntries() // broadcast new log to followers
+
 	rf.persist()
 	RaftInfo("New entry appended to leader's log: %v", rf, rf.logs[index-1])
 

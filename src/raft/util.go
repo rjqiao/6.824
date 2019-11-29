@@ -15,13 +15,11 @@ const (
 )
 
 const (
-	RaftRPCTimeout               = 50 * time.Millisecond
-	HeartbeatTimeout             = 120 * time.Millisecond
+	RaftRPCTimeout   = 50 * time.Millisecond
+	HeartbeatTimeout = 120 * time.Millisecond
 )
 
-
-type LeaderBroadcastCommand struct {};
-
+type LeaderBroadcastCommand struct{};
 
 func init() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
