@@ -8,8 +8,20 @@ import (
 // Debugging
 const Debug = 0
 
-const RPCTimeout = 50 * time.Millisecond
-const CommitApplyIdleCheckInterval = 25 * time.Millisecond
+const (
+	Follower = iota
+	Candidate
+	Leader
+)
+
+const (
+	RaftRPCTimeout               = 50 * time.Millisecond
+	HeartbeatTimeout             = 120 * time.Millisecond
+)
+
+
+type LeaderBroadcastCommand struct {};
+
 
 func init() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
@@ -22,13 +34,13 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-func RaftForcePrint(format string, rf *Raft, a ...interface{}) (n int, err error) {
+func RaftForcePrint(format string, rf *Raft, a ...interface{}) {
 	args := append([]interface{}{rf.me, rf.currentTerm, rf.status}, a...)
 	log.Printf("[Force] Raft: [Id: %d | Term: %d | %v] "+format, args...)
 	return
 }
 
-func RaftInfo(format string, rf *Raft, a ...interface{}) (n int, err error) {
+func RaftInfo(format string, rf *Raft, a ...interface{}) {
 	if Debug > 0 {
 		args := append([]interface{}{rf.me, rf.currentTerm, rf.status}, a...)
 		log.Printf("[INFO] Raft: [Id: %d | Term: %d | %v] "+format, args...)
@@ -36,7 +48,7 @@ func RaftInfo(format string, rf *Raft, a ...interface{}) (n int, err error) {
 	return
 }
 
-func RaftDebug(format string, rf *Raft, a ...interface{}) (n int, err error) {
+func RaftDebug(format string, rf *Raft, a ...interface{}) {
 	if Debug > 1 {
 		args := append([]interface{}{rf.me, rf.currentTerm, rf.status}, a...)
 		log.Printf("[DEBUG] Raft: [Id: %d | Term: %d | %v] "+format, args...)
@@ -44,7 +56,7 @@ func RaftDebug(format string, rf *Raft, a ...interface{}) (n int, err error) {
 	return
 }
 
-func sendRPCRequest(requestName string, requestBlock func() bool) bool {
+func SendRPCRequest(requestName string, rpcTimeout time.Duration, requestBlock func() bool) bool {
 	ch := make(chan bool, 1)
 	exit := make(chan bool, 1)
 
@@ -54,7 +66,7 @@ func sendRPCRequest(requestName string, requestBlock func() bool) bool {
 		case <-exit:
 			return
 		}
-		// within timeout
+		// some code if requestBlock() finishes in timeout
 
 		return
 	}()
@@ -62,7 +74,7 @@ func sendRPCRequest(requestName string, requestBlock func() bool) bool {
 	select {
 	case ok := <-ch:
 		return ok
-	case <-time.After(RPCTimeout):
+	case <-time.After(rpcTimeout):
 		exit <- true
 		return false
 	}

@@ -26,12 +26,6 @@ import (
 )
 import "labrpc"
 
-const (
-	Follower = iota
-	Candidate
-	Leader
-)
-
 func init() {
 	//rand.Seed(time.Now().UTC().UnixNano())
 }
@@ -82,9 +76,11 @@ type Raft struct {
 	// others
 	status int
 
-	applyCh            chan<- ApplyMsg
-	gotGoodRequestVote chan bool
-	heartbeat          chan bool
+	applyChBuffer           chan ApplyMsg
+	applyCh                 chan<- ApplyMsg
+	gotGoodRequestVote      chan bool
+	heartbeat               chan bool
+	otherResetElectionTimer chan bool
 }
 
 type LogEntry struct {
@@ -222,6 +218,7 @@ func (rf *Raft) transitionToCandidate() {
 }
 
 func (rf *Raft) transitionToFollower(newTerm int) {
+	RaftInfo("transit to follower, new term: %d", rf, newTerm)
 	rf.status = Follower
 	rf.currentTerm = newTerm
 	rf.votedFor = -1
@@ -245,11 +242,16 @@ func (rf *Raft) promoteToLeader() {
 			rf.matchIndex[i] = 0                    // Index of highest log entry known to be replicated on server
 		}
 	}
+
+	// append a ControlCommand LeaderBroadcast
+	//go rf.Start(LeaderBroadcast{})
+
 	go rf.heartbeatDaemonProcess()
 }
 
 func (rf *Raft) setCommitIndexAndApplyStateMachine(commitIndex int) {
-	rf.commitIndex = commitIndex;
+	rf.commitIndex = commitIndex
+	RaftInfo("Commit to commitIndex: %d", rf, commitIndex)
 	go rf.applyLocalStateMachine()
 }
 
@@ -313,23 +315,34 @@ func (rf *Raft) applyLocalStateMachine() {
 	rf.mu.Lock()
 	if rf.commitIndex > 0 && rf.commitIndex > rf.lastApplied {
 		entries := make([]LogEntry, rf.commitIndex-rf.lastApplied)
+		commitIndexInThisApply := rf.commitIndex
+		// assert len(entries) > 0
 		RaftDebug("Applying: len(rf.logs) = %d", rf, len(rf.logs))
 		copy(entries, rf.logs[rf.lastApplied:rf.commitIndex])
+		RaftInfo("Locally applying %d log entries. lastApplied: %d. commitIndex: %d",
+			rf, len(entries), rf.lastApplied, rf.commitIndex)
+
 		rf.mu.Unlock()
-		RaftInfo("Locally applying %d log entries. lastApplied: %d. commitIndex: %d", rf, len(entries), rf.lastApplied, rf.commitIndex)
 		for _, log := range entries {
-			rf.applyCh <- ApplyMsg{CommandValid: true, CommandIndex: log.Index, Command: log.Command}
+			rf.applyChBuffer <- ApplyMsg{CommandValid: true, CommandIndex: log.Index, Command: log.Command}
 		}
 
 		rf.mu.Lock()
-		rf.lastApplied = rf.commitIndex
+		rf.lastApplied = MaxInt(rf.lastApplied, commitIndexInThisApply)
 		rf.mu.Unlock()
 	} else {
 		rf.mu.Unlock()
 	}
 }
 
-func (rf *Raft) updateLogAndCommitIndexWhenReceivingAppendEntriesSuccess(Entries []LogEntry, PrevLogIndex int, LeaderCommit int) {
+func (rf *Raft) applyFromChBufferToChDaemon() {
+	for msg := range rf.applyChBuffer {
+		rf.applyCh <- msg
+	}
+}
+
+func (rf *Raft) updateLogAndCommitIndexWhenReceivingAppendEntriesSuccess(Entries []LogEntry, PrevLogIndex, LeaderCommit int) {
+	commitIndexToUpdate := LeaderCommit
 	if len(Entries) != 0 {
 		lastValidIndex := PrevLogIndex
 		for lastValidIndex+1 <= MinInt(Entries[len(Entries)-1].Index, rf.getLastIndex()) &&
@@ -337,7 +350,7 @@ func (rf *Raft) updateLogAndCommitIndexWhenReceivingAppendEntriesSuccess(Entries
 			lastValidIndex++
 		}
 		rf.logs = append(rf.logs[:lastValidIndex], Entries[lastValidIndex-PrevLogIndex:]...)
-		//rf.persist()
+		commitIndexToUpdate = MinInt(commitIndexToUpdate, Entries[len(Entries)-1].Index)
 	}
 
 	// update commitIndex
@@ -345,7 +358,7 @@ func (rf *Raft) updateLogAndCommitIndexWhenReceivingAppendEntriesSuccess(Entries
 	// assert LeaderCommit >= rf.commitIndex
 
 	// can be old message? without MaxInt
-	rf.setCommitIndexAndApplyStateMachine(MaxInt(LeaderCommit, rf.commitIndex))
+	rf.setCommitIndexAndApplyStateMachine(MaxInt(commitIndexToUpdate, rf.commitIndex))
 }
 
 // lock outside
@@ -374,9 +387,6 @@ func (rf *Raft) buildAppendEntriesReplyWhenNotSuccess(reply *AppendEntriesReply,
 // lock inside
 // no side effect
 func (rf *Raft) buildAppendEntriesArgs(server int) *AppendEntriesArgs {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
 	prevLogIndex := 0
 	prevLogTerm := 0
 	var entries []LogEntry
@@ -441,11 +451,21 @@ func (rf *Raft) updateNextIndexWhenAppendEntriesFail(server int, reply *AppendEn
 // 更新nextIndex, matchIndex, updatecommitIndex
 // send to applyCh
 // lock outside
-func (rf *Raft) updateIndexesAndApplyWhenSuccess(server int) {
-	rf.nextIndex[server] = rf.getLastIndex() + 1
-	rf.matchIndex[server] = rf.getLastIndex()
+func (rf *Raft) updateIndexesAndApplyWhenSuccess(server int, args *AppendEntriesArgs) {
+	if len(args.Entries) == 0 {
+		RaftInfo("heartbeat success to %d", rf, server, )
+		return
+	}
+
+	// Only use $args but not current rf!!!!
+	lastIndexNewlyAppendToServer := args.Entries[len(args.Entries)-1].Index
+
+	rf.nextIndex[server] = lastIndexNewlyAppendToServer + 1
+	rf.matchIndex[server] = lastIndexNewlyAppendToServer
+
 	rf.updateCommitIndex()
-	RaftDebug("Send AppendEntries to %d ++: new matchIndex = %d, commitIndex = %d", rf, server, rf.matchIndex[server], rf.commitIndex)
+	RaftDebug("Send AppendEntries to %d ++: new matchIndex = %d, commitIndex = %d",
+		rf, server, rf.matchIndex[server], rf.commitIndex)
 }
 
 // ----------------------------------------------------------------
@@ -455,29 +475,33 @@ func (rf *Raft) updateIndexesAndApplyWhenSuccess(server int) {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-
+	isGoodRequestVote := false
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+
+	defer func() {
+		rf.mu.Unlock()
+		if isGoodRequestVote {
+			rf.gotGoodRequestVote <- true
+		}
+	}()
 
 	if args.Term < rf.currentTerm {
-		reply.VoteGranted = false
-		reply.Term = rf.currentTerm
+		*reply = RequestVoteReply{Term: rf.currentTerm, VoteGranted: false}
 		return
 	}
+
+	isGoodRequestVote = true
 
 	if args.Term > rf.currentTerm {
 		rf.transitionToFollower(args.Term)
 	}
 
-	rf.gotGoodRequestVote <- true
 	// assert(args.Term == rf.currentTerm)
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && rf.isUptoDate(args.LastLogIndex, args.LastLogTerm) {
 		rf.votedFor = args.CandidateId
-		reply.VoteGranted = true
-		reply.Term = args.Term
+		*reply = RequestVoteReply{Term: args.Term, VoteGranted: true}
 	} else {
-		reply.VoteGranted = false
-		reply.Term = args.Term
+		*reply = RequestVoteReply{Term: args.Term, VoteGranted: false}
 	}
 
 	rf.persist()
@@ -515,14 +539,20 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	requestBlock := func() bool { return rf.peers[server].Call("Raft.RequestVote", args, reply) }
-	ok := sendRPCRequest("Raft.RequestVote", requestBlock)
+	ok := SendRPCRequest("Raft.RequestVote", RaftRPCTimeout, requestBlock)
 	return ok
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	goodHeartBeat := false
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	//RaftDebug("AppendEntries: leader = %d", rf, args.LeaderId)
+
+	defer func() {
+		rf.mu.Unlock()
+		if goodHeartBeat {
+			rf.heartbeat <- true
+		}
+	}()
 
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
@@ -531,9 +561,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	rf.heartbeat <- true
+	if rf.status == Leader && args.Term == rf.currentTerm {
+		panic("Should not happen! rf.status == Leader && args.Term == rf.currentTerm")
+	}
 
-	if args.Term > rf.currentTerm || rf.status == Candidate {
+	goodHeartBeat = true
+
+	if args.Term > rf.currentTerm {
 		rf.transitionToFollower(args.Term)
 	}
 
@@ -544,6 +578,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// check PrevLogIndex and PrevLogTerm
 	if (args.PrevLogIndex == 0) ||
 		(args.PrevLogIndex <= rf.getLastIndex() && args.PrevLogTerm == rf.getTermForIndex(args.PrevLogIndex)) {
+
+		lastCommand := -1
+		if len(args.Entries) != 0 {
+			lastCommand = args.Entries[len(args.Entries)-1].Command.(int)
+		}
+		RaftInfo("AppendEntries: args.LeaderCommit = %d, lastLogCommand: %d", rf, args.LeaderCommit, lastCommand)
+
 		// no conflict
 		reply.Success = true
 		rf.updateLogAndCommitIndexWhenReceivingAppendEntriesSuccess(args.Entries, args.PrevLogIndex, args.LeaderCommit)
@@ -559,12 +600,20 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	requestBlock := func() bool {
 		return rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	}
-	ok := sendRPCRequest("Raft.AppendEntries", requestBlock)
+	ok := SendRPCRequest("Raft.AppendEntries", RaftRPCTimeout, requestBlock)
 	return ok
 }
 
 func (rf *Raft) sendAndCollectAppendEntries(server int) bool {
-	args := rf.buildAppendEntriesArgs(server) // lock inside
+	rf.mu.Lock()
+
+	if rf.status != Leader {
+		return false
+	}
+
+	args := rf.buildAppendEntriesArgs(server)
+
+	rf.mu.Unlock()
 
 	reply := &AppendEntriesReply{}
 	ok := rf.sendAppendEntries(server, args, reply)
@@ -572,29 +621,32 @@ func (rf *Raft) sendAndCollectAppendEntries(server int) bool {
 		return ok
 	}
 
-	RaftDebug("Send AppendEntries to %d ++: reply = %v", rf, server, reply)
-
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	// 上锁之后检查consistency
-	// 会出现不是leader的情况吗？
-	// 检查stale leader，应该不需要
-	if rf.status != Leader || args.Term < rf.currentTerm {
-		return ok
+
+	RaftDebug("Send AppendEntries to %d ++: reply = %v", rf, server, reply)
+
+	// should not work on stale RPC
+	if args.Term != rf.currentTerm {
+		return false
 	}
 
-	if reply.Term > rf.currentTerm {
+	// 上锁之后检查consistency
+	if rf.status != Leader {
+		return false
+	}
+
+	if rf.currentTerm < reply.Term {
 		rf.transitionToFollower(reply.Term)
 		rf.persist()
-		return ok
+		return false
 	}
 
 	//RaftDebug("append entries reply success? %v, reply term %d, from server %d", rf, reply.Success, reply.Term, server)
 
 	// side effect
 	if reply.Success {
-		// todo: if entries是空 -- 这里是为什么是todo？
-		rf.updateIndexesAndApplyWhenSuccess(server)
+		rf.updateIndexesAndApplyWhenSuccess(server, args)
 	} else {
 		rf.updateNextIndexWhenAppendEntriesFail(server, reply)
 	}
@@ -602,34 +654,28 @@ func (rf *Raft) sendAndCollectAppendEntries(server int) bool {
 	return ok
 }
 
+// No lock inside, should add lock outside
+// do not block
 func (rf *Raft) sendAllAppendEntries() {
+	if rf.status != Leader {
+		return
+	}
 	for i := range rf.peers {
-		rf.mu.Lock()
-		if i != rf.me && rf.status == Leader {
-			rf.mu.Unlock()
+		if i != rf.me {
 			go rf.sendAndCollectAppendEntries(i)
-		} else {
-			rf.mu.Unlock()
 		}
 	}
-	//rf.persist()
 }
 
 func (rf *Raft) heartbeatDaemonProcess() {
 	RaftDebug("heartbeat daemon started\n", rf)
-	var heartbeatTimeout = time.Millisecond * 120
 
 	for {
 		rf.mu.Lock()
-		if rf.status == Leader {
-			rf.mu.Unlock()
-			rf.sendAllAppendEntries()
-		} else {
-			rf.mu.Unlock()
-			return
-		}
+		rf.sendAllAppendEntries()
+		rf.mu.Unlock()
 		// 后sleep！！！
-		time.Sleep(heartbeatTimeout)
+		time.Sleep(HeartbeatTimeout)
 	}
 }
 
@@ -647,15 +693,19 @@ func (rf *Raft) electionDaemonProcess() {
 
 		case <-time.After(currTimeout):
 			// 需不需要其他条件？比如时间
-			if rf.status != Leader {
-				go rf.doElection()
-			}
+			// check is leader inside
+			go rf.doElection()
 		}
 	}
 }
 
 func (rf *Raft) doElection() {
 	rf.mu.Lock()
+	if rf.status == Leader {
+		rf.mu.Unlock()
+		return
+	}
+
 	RaftInfo("election timeout! start election\n", rf)
 	rf.transitionToCandidate()
 
@@ -690,25 +740,26 @@ func (rf *Raft) doElection() {
 			// Follower 说明有人能new
 			// Leader 说明已经成为Leader，结束
 			// stale candidate
-			if rf.status != Candidate || rf.currentTerm != args.Term {
+			// 保证是args.Term的vote
+			if rf.currentTerm != args.Term || rf.status != Candidate {
 				return
 			}
 
 			// 是不是不需要？
 			// 其他人的term更加新
-			if reply.Term > rf.currentTerm {
+			if rf.currentTerm < reply.Term {
 				rf.transitionToFollower(reply.Term)
 				rf.persist() // change term
+				rf.otherResetElectionTimer <- true
 				return
 			}
 
 			// 确认consistent了
 			if reply.VoteGranted {
 				voteCount++
-				//atomic.AddInt32(&voteCount, 1)
 			}
 
-			if voteCount*2 > len(rf.peers) && args.Term == rf.currentTerm && rf.status == Candidate {
+			if voteCount*2 > len(rf.peers) {
 				rf.promoteToLeader()
 				RaftInfo("become leader", rf)
 			}
@@ -745,6 +796,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	index = rf.getLastIndex() + 1
 	rf.logs = append(rf.logs, LogEntry{Index: index, Term: term, Command: command})
+	//rf.sendAllAppendEntries() // broadcast new log to followers
 	rf.persist()
 	RaftInfo("New entry appended to leader's log: %v", rf, rf.logs[index-1])
 
@@ -784,13 +836,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastApplied = 0
 	rf.transitionToFollower(0)
 	rf.applyCh = applyCh
+	rf.applyChBuffer = make(chan ApplyMsg, 500)
 	rf.gotGoodRequestVote = make(chan bool, 100)
+	rf.otherResetElectionTimer = make(chan bool, 100)
 	rf.heartbeat = make(chan bool, 100)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	go rf.electionDaemonProcess()
+	go rf.applyFromChBufferToChDaemon()
 
 	RaftInfo("Started server", rf)
 	return rf
