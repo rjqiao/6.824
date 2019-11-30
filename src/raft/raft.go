@@ -244,7 +244,7 @@ func (rf *Raft) promoteToLeader() {
 	}
 
 	// append a ControlCommand LeaderBroadcast
-	//go rf.Start(LeaderBroadcastCommand{})
+	go rf.Start(LeaderBroadcastCommand{})
 
 	go rf.heartbeatDaemonProcess()
 }
@@ -327,7 +327,7 @@ func (rf *Raft) applyLocalStateMachine() {
 			msg := ApplyMsg{CommandValid: true, CommandIndex: log.Index, Command: log.Command}
 			switch log.Command.(type) {
 			case LeaderBroadcastCommand:
-				msg.CommandValid = false
+				msg.CommandValid = true
 			default:
 			}
 
@@ -588,8 +588,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		lastCommand := -1
 		if len(args.Entries) != 0 {
-			lastCommand = args.Entries[len(args.Entries)-1].Command.(int)
+			lastCommand = -2
+			if x, ok := args.Entries[len(args.Entries)-1].Command.(int); ok {
+				lastCommand = x
+			}
 		}
+
 		RaftInfo("AppendEntries: args.LeaderCommit = %d, lastLogCommand: %v", rf, args.LeaderCommit, lastCommand)
 
 		// no conflict

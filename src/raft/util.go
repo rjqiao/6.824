@@ -1,12 +1,13 @@
 package raft
 
 import (
+	"encoding/gob"
 	"log"
 	"time"
 )
 
 // Debugging
-const Debug = 0
+const Debug = 1
 
 const (
 	Follower = iota
@@ -23,6 +24,7 @@ type LeaderBroadcastCommand struct{};
 
 func init() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	gob.Register(LeaderBroadcastCommand{})
 }
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
