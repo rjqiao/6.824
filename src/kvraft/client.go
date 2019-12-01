@@ -3,11 +3,27 @@ package raftkv
 import "labrpc"
 import "crypto/rand"
 import "math/big"
+import "sync/atomic"
+import "raft"
 
+var (
+	_clerkId int64 = 0
+)
+
+func GenerateId() int64 {
+	return atomic.AddInt64(&_clerkId, 1) - 1
+}
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	Id         int64
+	ReqSeq     int64
+	lastLeader int
+}
+
+func (ck *Clerk) GenerateReqSeq() int64 {
+	return atomic.AddInt64(&ck.ReqSeq, 1) - 1
 }
 
 func nrand() int64 {
@@ -18,9 +34,13 @@ func nrand() int64 {
 }
 
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
+
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.Id = GenerateId()
+	ck.ReqSeq = nrand()
+	ck.lastLeader = 0
 	return ck
 }
 
@@ -37,9 +57,28 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
-
 	// You will have to modify this function.
-	return ""
+
+	args := &GetArgs{Key: key}
+	reply := &GetReply{}
+
+	i := ck.lastLeader
+	for reply.Err != OK && reply.Err != ErrNoKey {
+		server := ck.servers[i%len(ck.servers)]
+		requestBlock := func() bool { return server.Call("KVServer.Get", args, reply) }
+		ok := raft.SendRPCRequest("KVServer.Get", ClerkRequestTimeout, requestBlock)
+
+		if !ok || reply.WrongLeader {
+			i++
+		} else {
+			ck.lastLeader = i
+		}
+	}
+
+	if reply.Err == ErrNoKey {
+		return ""
+	}
+	return reply.Value
 }
 
 //
@@ -54,6 +93,22 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	args := &PutAppendArgs{Key: key, Value: value, Op: op, ClerkId: ck.Id, RequestSeq: ck.GenerateReqSeq()}
+	reply := &PutAppendReply{}
+
+	i := ck.lastLeader
+	for reply.Err != OK {
+		server := ck.servers[i%len(ck.servers)]
+		requestBlock := func() bool {return server.Call("KVServer.PutAppend", args, reply)}
+
+		ok := raft.SendRPCRequest("KVServer.PutAppend", ClerkRequestTimeout, requestBlock)
+
+		if !ok || reply.WrongLeader {
+			i++
+		} else {
+			ck.lastLeader = i
+		}
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
