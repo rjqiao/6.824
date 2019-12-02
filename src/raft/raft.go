@@ -76,11 +76,15 @@ type Raft struct {
 	// others
 	status int
 
-	applyChBuffer           chan ApplyMsg
-	applyCh                 chan<- ApplyMsg
-	gotGoodRequestVote      chan bool
-	heartbeat               chan bool
-	otherResetElectionTimer chan bool
+	applyChBuffer chan ApplyMsg
+	applyCh       chan<- ApplyMsg
+
+	resetElectionTimer chan bool
+
+	killCh chan bool
+
+	// debug only
+	nanoSecCreated int64
 }
 
 type LogEntry struct {
@@ -110,7 +114,6 @@ func (rf *Raft) GetState() (int, bool) {
 
 	term = rf.currentTerm
 	isleader = rf.status == Leader
-
 	return term, isleader
 }
 
@@ -326,7 +329,6 @@ func (rf *Raft) applyLocalStateMachine() {
 		for _, log := range entries {
 			rf.applyChBuffer <- ApplyMsg{CommandValid: true, CommandIndex: log.Index, Command: log.Command}
 		}
-
 		rf.mu.Lock()
 		rf.lastApplied = MaxInt(rf.lastApplied, commitIndexInThisApply)
 		rf.mu.Unlock()
@@ -337,7 +339,12 @@ func (rf *Raft) applyLocalStateMachine() {
 
 func (rf *Raft) applyFromChBufferToChDaemon() {
 	for msg := range rf.applyChBuffer {
-		rf.applyCh <- msg
+		select {
+		case rf.applyCh <- msg:
+
+		case <-rf.killCh:
+			return
+		}
 	}
 }
 
@@ -481,7 +488,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer func() {
 		rf.mu.Unlock()
 		if isGoodRequestVote {
-			rf.gotGoodRequestVote <- true
+			rf.resetElectionTimer <- true
 		}
 	}()
 
@@ -539,7 +546,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	requestBlock := func() bool { return rf.peers[server].Call("Raft.RequestVote", args, reply) }
-	ok := SendRPCRequest("Raft.RequestVote", RaftRPCTimeout, requestBlock)
+	ok := SendRPCRequestWithRetry("Raft.RequestVote", RaftRPCTimeout, 5, requestBlock)
 	return ok
 }
 
@@ -550,7 +557,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer func() {
 		rf.mu.Unlock()
 		if goodHeartBeat {
-			rf.heartbeat <- true
+			rf.resetElectionTimer <- true
 		}
 	}()
 
@@ -597,10 +604,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	requestBlock := func() bool {
-		return rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	}
-	ok := SendRPCRequest("Raft.AppendEntries", RaftRPCTimeout, requestBlock)
+	requestBlock := func() bool { return rf.peers[server].Call("Raft.AppendEntries", args, reply) }
+	ok := SendRPCRequestWithRetry("Raft.AppendEntries", RaftRPCTimeout, 3, requestBlock)
 	return ok
 }
 
@@ -621,8 +626,14 @@ func (rf *Raft) sendAndCollectAppendEntries(server int) bool {
 		return ok
 	}
 
+	isResetElectionTimer := false
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	defer func() {
+		rf.mu.Unlock()
+		if isResetElectionTimer {
+			rf.resetElectionTimer <- true
+		}
+	}()
 
 	RaftDebug("Send AppendEntries to %d ++: reply = %v", rf, server, reply)
 
@@ -639,6 +650,7 @@ func (rf *Raft) sendAndCollectAppendEntries(server int) bool {
 	if rf.currentTerm < reply.Term {
 		rf.transitionToFollower(reply.Term)
 		rf.persist()
+		isResetElectionTimer = true
 		return false
 	}
 
@@ -671,6 +683,12 @@ func (rf *Raft) heartbeatDaemonProcess() {
 	RaftDebug("heartbeat daemon started\n", rf)
 
 	for {
+		select {
+		case <-rf.killCh:
+			return
+		default:
+		}
+
 		rf.mu.Lock()
 		rf.sendAllAppendEntries()
 		rf.mu.Unlock()
@@ -681,20 +699,19 @@ func (rf *Raft) heartbeatDaemonProcess() {
 
 func (rf *Raft) electionDaemonProcess() {
 	electionTimeout := func() time.Duration {
-		t := time.Duration(rand.Intn(300)) + 200
-		return time.Millisecond * (t)
+		return electionBaseTimeout + time.Duration(rand.Int63n(int64(electionRandomTimeout)))
 	}
 	for {
 		currTimeout := electionTimeout()
 		select {
-		// 重置timeout
-		case <-rf.heartbeat:
-		case <-rf.gotGoodRequestVote:
-
 		case <-time.After(currTimeout):
 			// 需不需要其他条件？比如时间
 			// check is leader inside
 			go rf.doElection()
+		case <-rf.killCh:
+			return
+		// 重置timeout
+		case <-rf.resetElectionTimer:
 		}
 	}
 }
@@ -733,8 +750,14 @@ func (rf *Raft) doElection() {
 				return
 			}
 
+			isResetElectionTimer := false
 			rf.mu.Lock()
-			defer rf.mu.Unlock()
+			defer func() {
+				rf.mu.Unlock()
+				if isResetElectionTimer {
+					rf.resetElectionTimer <- true
+				}
+			}()
 
 			// 是不是不需要？
 			// Follower 说明有人能new
@@ -750,7 +773,7 @@ func (rf *Raft) doElection() {
 			if rf.currentTerm < reply.Term {
 				rf.transitionToFollower(reply.Term)
 				rf.persist() // change term
-				rf.otherResetElectionTimer <- true
+				isResetElectionTimer = true
 				return
 			}
 
@@ -796,7 +819,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	index = rf.getLastIndex() + 1
 	rf.logs = append(rf.logs, LogEntry{Index: index, Term: term, Command: command})
-	//rf.sendAllAppendEntries() // broadcast new log to followers
+	rf.sendAllAppendEntries() // broadcast new log to followers
 	rf.persist()
 	RaftInfo("New entry appended to leader's log: %v", rf, rf.logs[index-1])
 
@@ -811,6 +834,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	RaftInfo("Killed!", rf)
+	close(rf.killCh)
 }
 
 //
@@ -827,6 +855,7 @@ func (rf *Raft) Kill() {
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
+
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
@@ -837,9 +866,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.transitionToFollower(0)
 	rf.applyCh = applyCh
 	rf.applyChBuffer = make(chan ApplyMsg, 500)
-	rf.gotGoodRequestVote = make(chan bool, 100)
-	rf.otherResetElectionTimer = make(chan bool, 100)
-	rf.heartbeat = make(chan bool, 100)
+
+	rf.resetElectionTimer = make(chan bool, 100)
+
+	rf.killCh = make(chan bool)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -848,5 +878,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go rf.applyFromChBufferToChDaemon()
 
 	RaftInfo("Started server", rf)
+
+	// debug only
+	rf.nanoSecCreated = time.Now().UnixNano()
+
 	return rf
 }
