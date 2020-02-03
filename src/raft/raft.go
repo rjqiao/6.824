@@ -230,6 +230,7 @@ func (rf *Raft) transitionToFollower(newTerm int) {
 // lock outside
 // assert rf.status != Leader
 func (rf *Raft) promoteToLeader() {
+	RaftForcePrint("become leader", rf)
 	if rf.status == Leader {
 		return
 	}
@@ -254,7 +255,7 @@ func (rf *Raft) promoteToLeader() {
 
 func (rf *Raft) setCommitIndexAndApplyStateMachine(commitIndex int) {
 	rf.commitIndex = commitIndex
-	RaftInfo("Commit to commitIndex: %d", rf, commitIndex)
+	RaftForcePrint("Commit to commitIndex: %d", rf, commitIndex)
 	go rf.applyLocalStateMachine()
 }
 
@@ -327,6 +328,8 @@ func (rf *Raft) applyLocalStateMachine() {
 
 		rf.mu.Unlock()
 		for _, log := range entries {
+			RaftForcePrint("Apply Command: %v", rf, log.Command)
+
 			rf.applyChBuffer <- ApplyMsg{CommandValid: true, CommandIndex: log.Index, Command: log.Command}
 		}
 		rf.mu.Lock()
@@ -364,8 +367,12 @@ func (rf *Raft) updateLogAndCommitIndexWhenReceivingAppendEntriesSuccess(Entries
 	// assert args.LeaderCommit <= rf.getLastEntryIndex()
 	// assert LeaderCommit >= rf.commitIndex
 
-	// can be old message? without MaxInt
-	rf.setCommitIndexAndApplyStateMachine(MaxInt(commitIndexToUpdate, rf.commitIndex))
+	//// can be old message? without MaxInt
+	//rf.setCommitIndexAndApplyStateMachine(MaxInt(commitIndexToUpdate, rf.commitIndex))
+
+	if commitIndexToUpdate > rf.commitIndex {
+		rf.setCommitIndexAndApplyStateMachine(commitIndexToUpdate)
+	}
 }
 
 // lock outside
@@ -545,7 +552,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 //
 
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	requestBlock := func() bool { return rf.peers[server].Call("Raft.RequestVote", args, reply) }
+	requestBlock := func() bool {
+		*reply = RequestVoteReply{}
+		return rf.peers[server].Call("Raft.RequestVote", args, reply)
+	}
 	ok := SendRPCRequestWithRetry("Raft.RequestVote", RaftRPCTimeout, 5, requestBlock)
 	return ok
 }
@@ -586,11 +596,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if (args.PrevLogIndex == 0) ||
 		(args.PrevLogIndex <= rf.getLastIndex() && args.PrevLogTerm == rf.getTermForIndex(args.PrevLogIndex)) {
 
-		lastCommand := -1
-		if len(args.Entries) != 0 {
-			lastCommand = args.Entries[len(args.Entries)-1].Command.(int)
-		}
-		RaftInfo("AppendEntries: args.LeaderCommit = %d, lastLogCommand: %d", rf, args.LeaderCommit, lastCommand)
+		//lastCommand := -1
+		//if len(args.Entries) != 0 {
+		//	lastCommand = args.Entries[len(args.Entries)-1].Command.(int)
+		//}
+		//RaftInfo("AppendEntries: args.LeaderCommit = %d, lastLogCommand: %d", rf, args.LeaderCommit, lastCommand)
 
 		// no conflict
 		reply.Success = true
@@ -604,7 +614,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	requestBlock := func() bool { return rf.peers[server].Call("Raft.AppendEntries", args, reply) }
+	requestBlock := func() bool {
+		*reply = AppendEntriesReply{}
+		return rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	}
 	ok := SendRPCRequestWithRetry("Raft.AppendEntries", RaftRPCTimeout, 3, requestBlock)
 	return ok
 }
@@ -878,6 +891,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go rf.applyFromChBufferToChDaemon()
 
 	RaftInfo("Started server", rf)
+	RaftForcePrint("Started server", rf)
 
 	// debug only
 	rf.nanoSecCreated = time.Now().UnixNano()

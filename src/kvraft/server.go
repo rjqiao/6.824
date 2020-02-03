@@ -3,28 +3,12 @@ package raftkv
 import (
 	"labgob"
 	"labrpc"
-	"log"
 	"raft"
 	"sync"
 	"time"
 )
 
-const Debug = 0
-
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug > 0 {
-		log.Printf(format, a...)
-	}
-	return
-}
-
 type Operation int
-
-const (
-	Put Operation = iota
-	Append
-	Get
-)
 
 type KVServer struct {
 	mu      sync.Mutex
@@ -37,9 +21,10 @@ type KVServer struct {
 	// Your definitions here.
 
 	// View of log, will eventually consistent to raft logs
-	data           map[string]string          // Key -> Value
-	notifyCh       map[int]chan raft.ApplyMsg // logIndex -> channel
-	latestRequests map[int64]int64            // ClerkId -> ReqSeq
+	data                  map[string]string          // Key -> Value
+	notifyCh              map[int]chan raft.ApplyMsg // logIndex -> channel
+	latestRequests        map[int64]int64            // ClerkId -> ReqSeq
+	latestAppliedLogIndex int                        // logIndex last applied
 }
 
 func (kv *KVServer) handleApplyMsg() {
@@ -49,27 +34,48 @@ func (kv *KVServer) handleApplyMsg() {
 			// Is it here to change view of state machine? Yes
 			command := msg.Command.(RaftKVCommand)
 
-			// dedup
-			// because each clerk guarantees issue next request
-			// after the current request succeeds
-			if kv.latestRequests[command.ClerkId] != command.RequestSeq {
+			kv.mu.Lock()
+
+			KVServerInfo("get from ApplyCh, Clerkid: %d, ReqSeq: %d, Op: %s, Key: %s, Value: %s, CommitIndex: %d", kv,
+				command.ClerkId, command.RequestSeq, command.Op, command.Key, command.Value, msg.CommandIndex)
+
+			if kv.latestAppliedLogIndex >= msg.CommandIndex {
+				KVServerInfo("Obselete Apply: %d", kv, msg.CommandIndex)
+			} else {
+				// dedup
+				// because each clerk guarantees issue next request
+				// after the current request succeeds
 				switch command.Op {
-				case Put:
+				case "Put":
 					kv.data[command.Key] = command.Value
-				case Append:
-					kv.data[command.Key] += command.Value
-				case Get:
+				case "Append":
+					// 不等幂，需要dedup
+					if kv.latestRequests[command.ClerkId] != command.RequestSeq{
+						kv.data[command.Key] += command.Value
+					}
+				case "Get":
+					command.Value = kv.data[command.Key]
+					msg.Command = command
 				default:
 				}
+
+
+				KVServerInfo("In db -- Op: %s, Key: %s, Value: %s", kv, command.Op, command.Key, command.Value)
 				kv.latestRequests[command.ClerkId] = command.RequestSeq
 			}
+
 
 			// if !ok, then stale or short cut request?
 			// only index with request has notifyCh[index]
 			if ch, ok := kv.notifyCh[msg.CommandIndex]; ok {
+				kv.mu.Unlock()
 				ch <- msg
 				close(ch)
+			} else {
+				kv.mu.Unlock()
+				KVServerInfo("get from ApplyCh, channel failure", kv)
 			}
+
 		}
 	}
 }
@@ -78,7 +84,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 
 	command := RaftKVCommand{
-		Op:    Get,
+		Op:    "Get",
 		Key:   args.Key,
 		Value: "",
 
@@ -86,10 +92,12 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		RequestSeq: args.RequestSeq,
 	}
 
-	index, term, isLeader := kv.rf.Start(command)
+	kv.mu.Lock()
+
+	index, _, isLeader := kv.rf.Start(command)
 
 	if !isLeader {
-		*reply = GetReply{WrongLeader: true, Err: OK, Value: ""}
+		*reply = GetReply{WrongLeader: true, Err: ErrWrongLeader, Value: ""}
 		return
 	}
 
@@ -99,82 +107,136 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		close(ch) // should only be deleted in producer side?
 	}
 
-	recvCh := make(chan raft.ApplyMsg)
-	kv.notifyCh[index] = recvCh
+	kv.notifyCh[index] = make(chan raft.ApplyMsg)
+	ch := kv.notifyCh[index]
+
+	kv.mu.Unlock()
+
+	KVServerInfo("Get received: index -- %d, key: %x", kv, index, args.Key)
 
 	for {
 		select {
-		case msg, ok := <-recvCh:
-			//term, isLeader := kv.rf.GetState()
-			//if !isLeader {
-			//	*reply = GetReply{WrongLeader:true, Err: ErrUnknown, Value:""}
-			//	return
-			//}
-
+		case msg, ok := <-ch:
 			if !ok {
 				// stale index?
-				*reply = GetReply{WrongLeader: true, Err: ErrStaleIndex}
+				*reply = GetReply{WrongLeader: false, Err: ErrStaleIndex}
+				return
 			}
 
 			notifiedCommand := msg.Command.(RaftKVCommand)
 
-			// might happen !!!
-			if notifiedCommand != command {
+			KVServerInfo("Got reply -- Op: %s, ClerkId: %d. ReqSeq: %d, Key: %x, Value: %x", kv,
+				notifiedCommand.Op, notifiedCommand.ClerkId, notifiedCommand.RequestSeq, notifiedCommand.Key, notifiedCommand.Value)
+
+			// might happen !!!  ??
+			if notifiedCommand.RequestSeq != command.RequestSeq ||
+				notifiedCommand.ClerkId != command.ClerkId {
 				panic("should not happen! notifiedCommand != command")
 
 				//*reply = GetReply{WrongLeader: true, Err: ErrUnknown}
 				//return
 			}
+			*reply = GetReply{WrongLeader: false, Err: OK, Value: notifiedCommand.Value,}
 
-			*reply = GetReply{WrongLeader: false, Err: OK, Value: kv.data[command.Key],}
+			kv.mu.Lock()
 			delete(kv.notifyCh, index)
+			kv.mu.Unlock()
+
 			return
 
-
 		case <-time.After(CheckIsLeaderTimeout):
+			kv.mu.Lock()
 			if _, isLeader := kv.rf.GetState(); !isLeader {
-				*reply = GetReply{WrongLeader:true, Err:ErrUnknown}
+				*reply = GetReply{WrongLeader: true, Err: ErrWrongLeader}
 				delete(kv.notifyCh, index)
+				kv.mu.Unlock()
 				return
+			} else {
+				kv.mu.Unlock()
 			}
 		}
 	}
-
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 
-	op := Put
+	op := "Put"
 	if args.Op == "Append" {
-		op = Append
+		op = "Append"
 	}
 
-	// fast reply
-
-	// wait until get from ApplyMsg
 	command := RaftKVCommand{
-		Op:         op,
+		Op:    op,
+		Key:   args.Key,
+		Value: args.Value,
+
 		ClerkId:    args.ClerkId,
 		RequestSeq: args.RequestSeq,
 	}
 
-	index, term, isLeader := kv.rf.Start(command)
+	kv.mu.Lock()
+	index, _, isLeader := kv.rf.Start(command)
+
+	KVServerInfo("%s received: index -- %d, key: %s, value: %s, isLeader: %t", kv, op, index, args.Key, args.Value, isLeader)
 
 	if !isLeader {
-		*reply = PutAppendReply{WrongLeader: false, Err: OK}
+		*reply = PutAppendReply{WrongLeader: true, Err: ErrWrongLeader}
+		kv.mu.Unlock()
 		return
 	}
 
-	kv.notifyCh[index] = make(chan raft.ApplyMsg)
+	if ch, ok := kv.notifyCh[index]; ok {
+		delete(kv.notifyCh, index)
+		close(ch)
+	}
 
-	select {
-	case msg := <-kv.notifyCh[index]:
-		notifiedCommand := msg.Command.(RaftKVCommand)
-		if notifiedCommand != command {
-			*reply = PutAppendReply{WrongLeader: true, Err: ErrUnknown}
-		} else {
+	kv.notifyCh[index] = make(chan raft.ApplyMsg)
+	ch := kv.notifyCh[index]
+
+	//KVServerInfo("%s received: index -- %d, key: %x, value: %x", kv, op, index, args.Key, args.Value)
+	kv.mu.Unlock()
+
+	for {
+		select {
+		case msg, ok := <-ch:
+			if !ok {
+				KVServerInfo("channel has been deleted in PutAppend", kv)
+				*reply = PutAppendReply{WrongLeader: false, Err: ErrStaleIndex}
+			}
+
+			notifiedCommand := msg.Command.(RaftKVCommand)
+
+			if notifiedCommand != command {
+				panic("should not happen! notifiedCommand != command")
+				//*reply = PutAppendReply{WrongLeader: true, Err: ErrUnknown}
+				//return
+			}
+
+			KVServerInfo("Got reply -- Op: %s, ClerkId: %d. ReqSeq: %d, Key: %s, Value: %s, CommitIndex: %d", kv,
+				notifiedCommand.Op, notifiedCommand.ClerkId, notifiedCommand.RequestSeq, notifiedCommand.Key, notifiedCommand.Value, msg.CommandIndex)
+
 			*reply = PutAppendReply{WrongLeader: false, Err: OK}
+
+			kv.mu.Lock()
+			delete(kv.notifyCh, index)
+			kv.mu.Unlock()
+
+			go func() {}()
+
+			KVServerInfo("PutAppend RPC Return!", kv)
+			return
+
+		case <-time.After(CheckIsLeaderTimeout):
+			kv.mu.Lock()
+			if _, isLeader := kv.rf.GetState(); !isLeader {
+				*reply = PutAppendReply{WrongLeader: true, Err: ErrWrongLeader}
+				delete(kv.notifyCh, index)
+				kv.mu.Unlock()
+				return
+			} else {
+				kv.mu.Unlock()
+			}
 		}
 	}
 
@@ -189,6 +251,10 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 func (kv *KVServer) Kill() {
 	kv.rf.Kill()
 	// Your code here, if desired.
+
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
 }
 
 //
@@ -221,5 +287,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 
+	kv.data = make(map[string]string)
+	kv.notifyCh = make(map[int]chan raft.ApplyMsg)
+	kv.latestRequests = make(map[int64]int64)
+	kv.latestAppliedLogIndex = 0
+
+	go kv.handleApplyMsg()
 	return kv
 }

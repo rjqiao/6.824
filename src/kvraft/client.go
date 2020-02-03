@@ -1,6 +1,10 @@
 package raftkv
 
-import "labrpc"
+import (
+	"labrpc"
+	"log"
+	"time"
+)
 import "crypto/rand"
 import "math/big"
 import "sync/atomic"
@@ -62,23 +66,40 @@ func (ck *Clerk) Get(key string) string {
 	args := &GetArgs{Key: key}
 	reply := &GetReply{}
 
+	count := 0
 	i := ck.lastLeader
 	for reply.Err != OK && reply.Err != ErrNoKey {
 		server := ck.servers[i%len(ck.servers)]
-		requestBlock := func() bool { return server.Call("KVServer.Get", args, reply) }
+		requestBlock := func() bool {
+			*reply = GetReply{}
+			return server.Call("KVServer.Get", args, reply)
+		}
+
+
+		log.Printf("PutAppend, to server %d, key: %s, value: %s, op: %s, ClerkId: %v, ReqSeq: %v, times: %d",
+			i%len(ck.servers), key, reply.Value, "GET", ck.Id, args.RequestSeq, count)
+
 		ok := raft.SendRPCRequest("KVServer.Get", ClerkRequestTimeout, requestBlock)
+
+		log.Printf("PutAppend, to server %d, key: %s, value: %s, op: %s, ClerkId: %v, ReqSeq: %v, times: %d, ok?: %t, err: %s, wrongleader: %t",
+			i%len(ck.servers), key, reply.Value, "GET", ck.Id, args.RequestSeq, count, ok, reply.Err, reply.WrongLeader)
+
+		count++
 
 		if !ok || reply.WrongLeader {
 			i++
 		} else {
 			ck.lastLeader = i
 		}
-	}
 
+		time.Sleep(20*time.Millisecond)
+	}
+	log.Printf("Clerk %v -- Get, key: %v, value:%v, Err: %v", ck, key, reply.Value, reply.Err)
 	if reply.Err == ErrNoKey {
 		return ""
+	} else {
+		return reply.Value
 	}
-	return reply.Value
 }
 
 //
@@ -93,27 +114,50 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
-	args := &PutAppendArgs{Key: key, Value: value, Op: op, ClerkId: ck.Id, RequestSeq: ck.GenerateReqSeq()}
-	reply := &PutAppendReply{}
+	args := PutAppendArgs{Key: key, Value: value, Op: op, ClerkId: ck.Id, RequestSeq: ck.GenerateReqSeq()}
 
+	count := 0
 	i := ck.lastLeader
-	for reply.Err != OK {
+	for {
 		server := ck.servers[i%len(ck.servers)]
-		requestBlock := func() bool {return server.Call("KVServer.PutAppend", args, reply)}
+
+		reply := PutAppendReply{} // reset to default value
+		requestBlock := func() bool {
+			reply = PutAppendReply{}
+			return server.Call("KVServer.PutAppend", &args, &reply)
+		}
+
+		log.Printf("PutAppend, to server %d, key: %s, value: %s, op: %s, ClerkId: %v, ReqSeq: %v, times: %d",
+			i%len(ck.servers), key, value, op, ck.Id, args.RequestSeq, count)
 
 		ok := raft.SendRPCRequest("KVServer.PutAppend", ClerkRequestTimeout, requestBlock)
+
+		log.Printf("PutAppend, to server %d, key: %s, value: %s, op: %s, ClerkId: %v, ReqSeq: %v, times: %d, ok?: %t, err: %s, wrongleader: %t",
+			i%len(ck.servers), key, value, op, ck.Id, args.RequestSeq, count, ok, reply.Err, reply.WrongLeader)
+
+		count++
 
 		if !ok || reply.WrongLeader {
 			i++
 		} else {
 			ck.lastLeader = i
 		}
+
+		if ok && reply.Err == OK {
+			break
+		}
+
+		time.Sleep(20*time.Millisecond)
 	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
+	log.Printf("Clerk %v -- Put, key: %v, value:%v", ck, key, value)
 	ck.PutAppend(key, value, "Put")
+	log.Printf("Clerk %v -- Put finished, key: %v, value:%v", ck, key, value)
 }
 func (ck *Clerk) Append(key string, value string) {
+	log.Printf("Clerk %v -- Append, key: %v, value:%v", ck, key, value)
 	ck.PutAppend(key, value, "Append")
+	log.Printf("Clerk %v -- Append finished, key: %v, value:%v", ck, key, value)
 }

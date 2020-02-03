@@ -6,7 +6,7 @@ import (
 )
 
 // Debugging
-const Debug = 2
+const Debug = 0
 
 const (
 	Follower = iota
@@ -25,13 +25,6 @@ type LeaderBroadcastCommand struct{};
 
 func init() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
-}
-
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug > 0 {
-		log.Printf(format, a...)
-	}
-	return
 }
 
 func RaftForcePrint(format string, rf *Raft, a ...interface{}) {
@@ -79,6 +72,35 @@ func SendRPCRequest(requestName string, rpcTimeout time.Duration, requestBlock f
 		return false
 	}
 }
+
+//func SendRPCRequestKV(requestName string, rpcTimeout time.Duration, requestBlock func() bool) bool {
+//	ch := make(chan bool, 1)
+//	exit := make(chan bool, 1)
+//
+//	go func() {
+//		select {
+//		case ch <- requestBlock():
+//		case <-exit:
+//			return
+//		}
+//		// some code if requestBlock() finishes in timeout
+//
+//		return
+//	}()
+//
+//	ri := rand.Int()
+//	log.Printf("rpcTimeout %v: %d", rpcTimeout, ri)
+//	select {
+//	case ok := <-ch:
+//		log.Printf("should be true: %v", ok)
+//		return ok
+//	case <-time.After(rpcTimeout):
+//		log.Printf("rpcTimeout! %d", ri)
+//		panic("should not reach rpcTimeout")
+//		exit <- true
+//		return false
+//	}
+//}
 
 func SendRPCRequestWithRetry(requestName string, rpcTimeout time.Duration, retryTimes int, requestBlock func() bool) bool {
 	for i:=0;i<retryTimes;i++ {

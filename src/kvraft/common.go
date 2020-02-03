@@ -1,10 +1,13 @@
 package raftkv
 
-import "time"
+import (
+	"log"
+	"time"
+)
 
 const (
-	ClerkRequestTimeout  time.Duration = time.Microsecond * 400
-	CheckIsLeaderTimeout time.Duration = time.Microsecond * 10
+	ClerkRequestTimeout  time.Duration = time.Millisecond * 400
+	CheckIsLeaderTimeout time.Duration = time.Millisecond * 10
 )
 
 type CommandType int
@@ -13,7 +16,7 @@ type RaftKVCommand struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	Op    Operation
+	Op    string
 	Key   string
 	Value string
 
@@ -26,6 +29,7 @@ const (
 	ErrNoKey      = "ErrNoKey"
 	ErrStaleIndex = "ErrStaleIndex"
 	ErrUnknown    = "ErrUnknown"
+	ErrWrongLeader = "ErrWrongLeader"
 )
 
 type Err string
@@ -58,4 +62,23 @@ type GetReply struct {
 	WrongLeader bool
 	Err         Err
 	Value       string
+}
+
+
+const Debug = 1
+
+func KVServerInfo(format string, kv *KVServer, a ...interface{}) {
+	if Debug > 0 {
+		args := append([]interface{}{kv.me}, a...)
+		log.Printf("[INFO] Raft: [Id: %d] "+format, args...)
+	}
+	return
+}
+
+func KVServerDebug(format string, kv *KVServer, a ...interface{}) {
+	if Debug > 1 {
+		args := append([]interface{}{kv.me}, a...)
+		log.Printf("[INFO] Raft: [Id: %d] "+format, args...)
+	}
+	return
 }
