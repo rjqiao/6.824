@@ -36,21 +36,20 @@ func (kv *KVServer) handleApplyMsg() {
 
 			kv.mu.Lock()
 
-			KVServerInfo("get from ApplyCh, Clerkid: %d, ReqSeq: %d, Op: %s, Key: %s, Value: %s, CommitIndex: %d", kv,
+			KVServerInfo("get from ApplyCh, ClerkId: %d, ReqSeq: %d, Op: %s, Key: %s, Value: %s, CommitIndex: %d", kv,
 				command.ClerkId, command.RequestSeq, command.Op, command.Key, command.Value, msg.CommandIndex)
 
 			if kv.latestAppliedLogIndex >= msg.CommandIndex {
-				KVServerInfo("Obselete Apply: %d", kv, msg.CommandIndex)
+				KVServerInfo("Obsolete Apply: %d", kv, msg.CommandIndex)
 			} else {
-				// dedup
-				// because each clerk guarantees issue next request
-				// after the current request succeeds
 				switch command.Op {
 				case "Put":
 					kv.data[command.Key] = command.Value
 				case "Append":
 					// 不等幂，需要dedup
-					if kv.latestRequests[command.ClerkId] != command.RequestSeq{
+					// dedup
+					// because each clerk guarantees issue next request after the current request succeeds
+					if kv.latestRequests[command.ClerkId] != command.RequestSeq {
 						kv.data[command.Key] += command.Value
 					}
 				case "Get":
@@ -59,17 +58,17 @@ func (kv *KVServer) handleApplyMsg() {
 				default:
 				}
 
-
 				KVServerInfo("In db -- Op: %s, Key: %s, Value: %s", kv, command.Op, command.Key, command.Value)
 				kv.latestRequests[command.ClerkId] = command.RequestSeq
 			}
 
-
-			// if !ok, then stale or short cut request?
-			// only index with request has notifyCh[index]
+			// !ok
+			// 1. Not leader, so no kv.notifCh[msg.CommandIndex] created
+			// 2. stale or short cut request ??
 			if ch, ok := kv.notifyCh[msg.CommandIndex]; ok {
 				kv.mu.Unlock()
 				ch <- msg
+				delete(kv.notifyCh, msg.CommandIndex)
 				close(ch)
 			} else {
 				kv.mu.Unlock()
@@ -102,28 +101,35 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 
 	// delete and close old channel, interrupt (old lastIndex) RPC and then return with error (maybe DeprecateReq)
-	if ch, ok := kv.notifyCh[index]; ok {
+	if _, ok := kv.notifyCh[index]; ok {
+		// only remove $ch from notifyCh map, but do not close it.
+		// $ch will finally be closed in producer side
 		delete(kv.notifyCh, index)
-		close(ch) // should only be deleted in producer side?
+		//close(ch) // should only be deleted in producer side?
 	}
 
 	kv.notifyCh[index] = make(chan raft.ApplyMsg)
 	ch := kv.notifyCh[index]
 
-	kv.mu.Unlock()
-
 	KVServerInfo("Get received: index -- %d, key: %x", kv, index, args.Key)
+	kv.mu.Unlock()
 
 	for {
 		select {
+		// may not receive from $ch, just block here.
+		// TODO: add timeout when waiting $ch result
 		case msg, ok := <-ch:
 			if !ok {
-				// stale index?
+				KVServerInfo("channel has been deleted in Get", kv)
 				*reply = GetReply{WrongLeader: false, Err: ErrStaleIndex}
 				return
 			}
 
 			notifiedCommand := msg.Command.(RaftKVCommand)
+			// make sure $command (receive from $ch) is the same (reqSeq, clerkId) one
+			if notifiedCommand.RequestSeq != command.RequestSeq || notifiedCommand.ClerkId != command.ClerkId {
+				panic("should not happen! The command received should have same (reqSeq, clerkId) pair")
+			}
 
 			KVServerInfo("Got reply -- Op: %s, ClerkId: %d. ReqSeq: %d, Key: %x, Value: %x", kv,
 				notifiedCommand.Op, notifiedCommand.ClerkId, notifiedCommand.RequestSeq, notifiedCommand.Key, notifiedCommand.Value)
@@ -138,9 +144,9 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			}
 			*reply = GetReply{WrongLeader: false, Err: OK, Value: notifiedCommand.Value,}
 
-			kv.mu.Lock()
-			delete(kv.notifyCh, index)
-			kv.mu.Unlock()
+			//kv.mu.Lock()
+			//delete(kv.notifyCh, index)
+			//kv.mu.Unlock()
 
 			return
 
@@ -186,52 +192,57 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 
-	if ch, ok := kv.notifyCh[index]; ok {
+	if _, ok := kv.notifyCh[index]; ok {
+		// only remove $ch from notifyCh map, but do not close it.
+		// $ch will finally be closed in producer side
 		delete(kv.notifyCh, index)
-		close(ch)
+		//close(ch)
 	}
 
 	kv.notifyCh[index] = make(chan raft.ApplyMsg)
 	ch := kv.notifyCh[index]
 
-	//KVServerInfo("%s received: index -- %d, key: %x, value: %x", kv, op, index, args.Key, args.Value)
+	KVServerInfo("%s received: index -- %d, key: %x, value: %x", kv, op, index, args.Key, args.Value)
 	kv.mu.Unlock()
 
 	for {
 		select {
+		// may not receive from $ch, just block here.
+		// TODO: add timeout when waiting $ch result
 		case msg, ok := <-ch:
 			if !ok {
 				KVServerInfo("channel has been deleted in PutAppend", kv)
 				*reply = PutAppendReply{WrongLeader: false, Err: ErrStaleIndex}
+				return
 			}
 
 			notifiedCommand := msg.Command.(RaftKVCommand)
 
-			if notifiedCommand != command {
-				panic("should not happen! notifiedCommand != command")
+			KVServerInfo("Got reply -- Op: %s, ClerkId: %d. ReqSeq: %d, Key: %s, Value: %s, CommitIndex: %d", kv,
+				notifiedCommand.Op, notifiedCommand.ClerkId, notifiedCommand.RequestSeq, notifiedCommand.Key, notifiedCommand.Value, msg.CommandIndex)
+
+			// make sure $command (receive from $ch) is the same (reqSeq, clerkId) one
+			if notifiedCommand.RequestSeq != command.RequestSeq || notifiedCommand.ClerkId != command.ClerkId {
+				panic("should not happen! The command received should have same (reqSeq, clerkId) pair")
 				//*reply = PutAppendReply{WrongLeader: true, Err: ErrUnknown}
 				//return
 			}
 
-			KVServerInfo("Got reply -- Op: %s, ClerkId: %d. ReqSeq: %d, Key: %s, Value: %s, CommitIndex: %d", kv,
-				notifiedCommand.Op, notifiedCommand.ClerkId, notifiedCommand.RequestSeq, notifiedCommand.Key, notifiedCommand.Value, msg.CommandIndex)
-
 			*reply = PutAppendReply{WrongLeader: false, Err: OK}
 
-			kv.mu.Lock()
-			delete(kv.notifyCh, index)
-			kv.mu.Unlock()
-
-			go func() {}()
+			//kv.mu.Lock()
+			//delete(kv.notifyCh, index)
+			//kv.mu.Unlock()
 
 			KVServerInfo("PutAppend RPC Return!", kv)
 			return
 
+		// KV Server and Raft in same process (goroutine) and crash at same time
 		case <-time.After(CheckIsLeaderTimeout):
 			kv.mu.Lock()
 			if _, isLeader := kv.rf.GetState(); !isLeader {
 				*reply = PutAppendReply{WrongLeader: true, Err: ErrWrongLeader}
-				delete(kv.notifyCh, index)
+				//delete(kv.notifyCh, index)
 				kv.mu.Unlock()
 				return
 			} else {
@@ -239,7 +250,17 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			}
 		}
 	}
+}
 
+func (kv *KVServer) putAppendCheckIsLeader(reply *PutAppendReply, index int) bool {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if _, isLeader := kv.rf.GetState(); !isLeader {
+		*reply = PutAppendReply{WrongLeader: true, Err: ErrWrongLeader}
+		delete(kv.notifyCh, index)
+		return false
+	}
+	return true
 }
 
 //
