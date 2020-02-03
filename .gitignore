@@ -3,6 +3,6 @@ api.key
 *-handin.tar.gz
 
 /.idea/
-dev_logs/
+/dev_logs/
 
 /src/playground

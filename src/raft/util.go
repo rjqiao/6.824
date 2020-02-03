@@ -15,13 +15,16 @@ const (
 )
 
 const (
-	RaftRPCTimeout   = 50 * time.Millisecond
-	HeartbeatTimeout = 120 * time.Millisecond
-	electionBaseTimeout = 400 * time.Millisecond
+	RaftRPCTimeout        = 50 * time.Millisecond
+	HeartbeatTimeout      = 120 * time.Millisecond
+	electionBaseTimeout   = 400 * time.Millisecond
 	electionRandomTimeout = 400 * time.Millisecond
 )
 
-type LeaderBroadcastCommand struct{};
+type LeaderBroadcastCommand struct{}
+
+type LogEntryIndexType int
+type TermType int
 
 func init() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
@@ -49,61 +52,35 @@ func RaftDebug(format string, rf *Raft, a ...interface{}) {
 	return
 }
 
+// Cause data race!
 func SendRPCRequest(requestName string, rpcTimeout time.Duration, requestBlock func() bool) bool {
-	ch := make(chan bool, 1)
-	exit := make(chan bool, 1)
+	//ch := make(chan bool, 1)
+	//exit := make(chan bool, 1)
+	//
+	//go func() {
+	//	select {
+	//	case ch <- requestBlock():
+	//	case <-exit:
+	//		return
+	//	}
+	//	// some code if requestBlock() finishes in timeout
+	//
+	//	return
+	//}()
+	//
+	//select {
+	//case ok := <-ch:
+	//	return ok
+	//case <-time.After(rpcTimeout):
+	//	exit <- true
+	//	return false
+	//}
 
-	go func() {
-		select {
-		case ch <- requestBlock():
-		case <-exit:
-			return
-		}
-		// some code if requestBlock() finishes in timeout
-
-		return
-	}()
-
-	select {
-	case ok := <-ch:
-		return ok
-	case <-time.After(rpcTimeout):
-		exit <- true
-		return false
-	}
+	return requestBlock()
 }
 
-//func SendRPCRequestKV(requestName string, rpcTimeout time.Duration, requestBlock func() bool) bool {
-//	ch := make(chan bool, 1)
-//	exit := make(chan bool, 1)
-//
-//	go func() {
-//		select {
-//		case ch <- requestBlock():
-//		case <-exit:
-//			return
-//		}
-//		// some code if requestBlock() finishes in timeout
-//
-//		return
-//	}()
-//
-//	ri := rand.Int()
-//	log.Printf("rpcTimeout %v: %d", rpcTimeout, ri)
-//	select {
-//	case ok := <-ch:
-//		log.Printf("should be true: %v", ok)
-//		return ok
-//	case <-time.After(rpcTimeout):
-//		log.Printf("rpcTimeout! %d", ri)
-//		panic("should not reach rpcTimeout")
-//		exit <- true
-//		return false
-//	}
-//}
-
 func SendRPCRequestWithRetry(requestName string, rpcTimeout time.Duration, retryTimes int, requestBlock func() bool) bool {
-	for i:=0;i<retryTimes;i++ {
+	for i := 0; i < retryTimes; i++ {
 		if SendRPCRequest(requestName, rpcTimeout, requestBlock) {
 			return true
 		}

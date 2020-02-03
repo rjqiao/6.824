@@ -2,7 +2,6 @@ package raftkv
 
 import (
 	"labrpc"
-	"log"
 	"time"
 )
 import "crypto/rand"
@@ -76,13 +75,13 @@ func (ck *Clerk) Get(key string) string {
 		}
 
 
-		log.Printf("PutAppend, to server %d, key: %s, value: %s, op: %s, ClerkId: %v, ReqSeq: %v, times: %d",
-			i%len(ck.servers), key, reply.Value, "GET", ck.Id, args.RequestSeq, count)
+		//log.Printf("PutAppend, to server %d, key: %s, value: %s, op: %s, ClerkId: %v, ReqSeq: %v, times: %d",
+		//	i%len(ck.servers), key, reply.Value, "GET", ck.Id, args.RequestSeq, count)
 
 		ok := raft.SendRPCRequest("KVServer.Get", ClerkRequestTimeout, requestBlock)
 
-		log.Printf("PutAppend, to server %d, key: %s, value: %s, op: %s, ClerkId: %v, ReqSeq: %v, times: %d, ok?: %t, err: %s, wrongleader: %t",
-			i%len(ck.servers), key, reply.Value, "GET", ck.Id, args.RequestSeq, count, ok, reply.Err, reply.WrongLeader)
+		//log.Printf("PutAppend, to server %d, key: %s, value: %s, op: %s, ClerkId: %v, ReqSeq: %v, times: %d, ok?: %t, err: %s, wrongleader: %t",
+		//	i%len(ck.servers), key, reply.Value, "GET", ck.Id, args.RequestSeq, count, ok, reply.Err, reply.WrongLeader)
 
 		count++
 
@@ -92,9 +91,9 @@ func (ck *Clerk) Get(key string) string {
 			ck.lastLeader = i
 		}
 
-		time.Sleep(20*time.Millisecond)
+		time.Sleep(ClerkRequestSleep)
 	}
-	log.Printf("Clerk %v -- Get, key: %v, value:%v, Err: %v", ck, key, reply.Value, reply.Err)
+	//log.Printf("Clerk %v -- Get, key: %v, value:%v, Err: %v", ck, key, reply.Value, reply.Err)
 	if reply.Err == ErrNoKey {
 		return ""
 	} else {
@@ -127,13 +126,13 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			return server.Call("KVServer.PutAppend", &args, &reply)
 		}
 
-		log.Printf("PutAppend, to server %d, key: %s, value: %s, op: %s, ClerkId: %v, ReqSeq: %v, times: %d",
-			i%len(ck.servers), key, value, op, ck.Id, args.RequestSeq, count)
+		//log.Printf("PutAppend, to server %d, key: %s, value: %s, op: %s, ClerkId: %v, ReqSeq: %v, times: %d",
+		//	i%len(ck.servers), key, value, op, ck.Id, args.RequestSeq, count)
 
 		ok := raft.SendRPCRequest("KVServer.PutAppend", ClerkRequestTimeout, requestBlock)
 
-		log.Printf("PutAppend, to server %d, key: %s, value: %s, op: %s, ClerkId: %v, ReqSeq: %v, times: %d, ok?: %t, err: %s, wrongleader: %t",
-			i%len(ck.servers), key, value, op, ck.Id, args.RequestSeq, count, ok, reply.Err, reply.WrongLeader)
+		//log.Printf("PutAppend, to server %d, key: %s, value: %s, op: %s, ClerkId: %v, ReqSeq: %v, times: %d, ok?: %t, err: %s, wrongleader: %t",
+		//	i%len(ck.servers), key, value, op, ck.Id, args.RequestSeq, count, ok, reply.Err, reply.WrongLeader)
 
 		count++
 
@@ -147,17 +146,17 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			break
 		}
 
-		time.Sleep(20*time.Millisecond)
+		time.Sleep(ClerkRequestSleep)
 	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
-	log.Printf("Clerk %v -- Put, key: %v, value:%v", ck, key, value)
+	//log.Printf("Clerk %v -- Put, key: %v, value:%v", ck, key, value)
 	ck.PutAppend(key, value, "Put")
-	log.Printf("Clerk %v -- Put finished, key: %v, value:%v", ck, key, value)
+	//log.Printf("Clerk %v -- Put finished, key: %v, value:%v", ck, key, value)
 }
 func (ck *Clerk) Append(key string, value string) {
-	log.Printf("Clerk %v -- Append, key: %v, value:%v", ck, key, value)
+	//log.Printf("Clerk %v -- Append, key: %v, value:%v", ck, key, value)
 	ck.PutAppend(key, value, "Append")
-	log.Printf("Clerk %v -- Append finished, key: %v, value:%v", ck, key, value)
+	//log.Printf("Clerk %v -- Append finished, key: %v, value:%v", ck, key, value)
 }

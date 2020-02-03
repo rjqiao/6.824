@@ -230,7 +230,7 @@ func (rf *Raft) transitionToFollower(newTerm int) {
 // lock outside
 // assert rf.status != Leader
 func (rf *Raft) promoteToLeader() {
-	RaftForcePrint("become leader", rf)
+	//RaftForcePrint("become leader", rf)
 	if rf.status == Leader {
 		return
 	}
@@ -255,7 +255,7 @@ func (rf *Raft) promoteToLeader() {
 
 func (rf *Raft) setCommitIndexAndApplyStateMachine(commitIndex int) {
 	rf.commitIndex = commitIndex
-	RaftForcePrint("Commit to commitIndex: %d", rf, commitIndex)
+	//RaftForcePrint("Commit to commitIndex: %d", rf, commitIndex)
 	go rf.applyLocalStateMachine()
 }
 
@@ -328,7 +328,7 @@ func (rf *Raft) applyLocalStateMachine() {
 
 		rf.mu.Unlock()
 		for _, log := range entries {
-			RaftForcePrint("Apply Command: %v", rf, log.Command)
+			//RaftForcePrint("Apply Command: %v", rf, log.Command)
 
 			rf.applyChBuffer <- ApplyMsg{CommandValid: true, CommandIndex: log.Index, Command: log.Command}
 		}
@@ -553,7 +553,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	requestBlock := func() bool {
-		*reply = RequestVoteReply{}
 		return rf.peers[server].Call("Raft.RequestVote", args, reply)
 	}
 	ok := SendRPCRequestWithRetry("Raft.RequestVote", RaftRPCTimeout, 5, requestBlock)
@@ -615,7 +614,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	requestBlock := func() bool {
-		*reply = AppendEntriesReply{}
 		return rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	}
 	ok := SendRPCRequestWithRetry("Raft.AppendEntries", RaftRPCTimeout, 3, requestBlock)
@@ -628,7 +626,6 @@ func (rf *Raft) sendAndCollectAppendEntries(server int) bool {
 	if rf.status != Leader {
 		return false
 	}
-
 	args := rf.buildAppendEntriesArgs(server)
 
 	rf.mu.Unlock()
@@ -640,6 +637,7 @@ func (rf *Raft) sendAndCollectAppendEntries(server int) bool {
 	}
 
 	isResetElectionTimer := false
+
 	rf.mu.Lock()
 	defer func() {
 		rf.mu.Unlock()
@@ -739,7 +737,7 @@ func (rf *Raft) doElection() {
 	RaftInfo("election timeout! start election\n", rf)
 	rf.transitionToCandidate()
 
-	args := &RequestVoteArgs{
+	args0 := &RequestVoteArgs{
 		Term:         rf.currentTerm,
 		CandidateId:  rf.me,
 		LastLogTerm:  rf.getLastTerm(),
@@ -754,10 +752,11 @@ func (rf *Raft) doElection() {
 		if i == rf.me {
 			continue
 		}
+		args := *args0
 		go func(i int) {
 			RaftDebug("do Election %d -> %d, start term %d", rf, rf.me, i, args.Term)
-			reply := &RequestVoteReply{}
-			ok := rf.sendRequestVote(i, args, reply)
+			reply := RequestVoteReply{}
+			ok := rf.sendRequestVote(i, &args, &reply)
 			RaftDebug("do Election reply %d -> %d, start-term %d, reply : %v", rf, rf.me, i, args.Term, reply)
 			if !ok {
 				return
@@ -891,7 +890,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go rf.applyFromChBufferToChDaemon()
 
 	RaftInfo("Started server", rf)
-	RaftForcePrint("Started server", rf)
+	//RaftForcePrint("Started server", rf)
 
 	// debug only
 	rf.nanoSecCreated = time.Now().UnixNano()

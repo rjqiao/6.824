@@ -6,8 +6,10 @@ import (
 )
 
 const (
-	ClerkRequestTimeout  time.Duration = time.Millisecond * 400
-	CheckIsLeaderTimeout time.Duration = time.Millisecond * 10
+	ClerkRequestTimeout         time.Duration = time.Millisecond * 400
+	CheckIsLeaderTimeout        time.Duration = time.Millisecond * 10
+	KvServerWaitNotifyChTimeout time.Duration = time.Millisecond * 400
+	ClerkRequestSleep           time.Duration = time.Millisecond * 20
 )
 
 type CommandType int
@@ -25,10 +27,10 @@ type RaftKVCommand struct {
 }
 
 const (
-	OK            = "OK"
-	ErrNoKey      = "ErrNoKey"
-	ErrStaleIndex = "ErrStaleIndex"
-	ErrUnknown    = "ErrUnknown"
+	OK             = "OK"
+	ErrNoKey       = "ErrNoKey"
+	ErrStaleIndex  = "ErrStaleIndex"
+	ErrUnknown     = "ErrUnknown"
 	ErrWrongLeader = "ErrWrongLeader"
 )
 
@@ -36,14 +38,14 @@ type Err string
 
 // Put or Append
 type PutAppendArgs struct {
-	Key   		string
-	Value 		string
-	Op    		string // "Put" or "Append"
+	Key   string
+	Value string
+	Op    string // "Put" or "Append"
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	ClerkId     int64
-	RequestSeq 	int64
+	ClerkId    int64
+	RequestSeq int64
 }
 
 type PutAppendReply struct {
@@ -52,10 +54,10 @@ type PutAppendReply struct {
 }
 
 type GetArgs struct {
-	Key 		string
+	Key string
 	// You'll have to add definitions here.
-	ClerkId     int64
-	RequestSeq 	int64
+	ClerkId    int64
+	RequestSeq int64
 }
 
 type GetReply struct {
@@ -63,7 +65,6 @@ type GetReply struct {
 	Err         Err
 	Value       string
 }
-
 
 const Debug = 1
 

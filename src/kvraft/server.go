@@ -114,10 +114,11 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	KVServerInfo("Get received: index -- %d, key: %x", kv, index, args.Key)
 	kv.mu.Unlock()
 
+	timer := time.After(KvServerWaitNotifyChTimeout)
 	for {
 		select {
-		// may not receive from $ch, just block here.
 		// TODO: add timeout when waiting $ch result
+		// may not receive from $ch, just block here.
 		case msg, ok := <-ch:
 			if !ok {
 				KVServerInfo("channel has been deleted in Get", kv)
@@ -151,17 +152,24 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			return
 
 		case <-time.After(CheckIsLeaderTimeout):
-			kv.mu.Lock()
-			if _, isLeader := kv.rf.GetState(); !isLeader {
-				*reply = GetReply{WrongLeader: true, Err: ErrWrongLeader}
-				delete(kv.notifyCh, index)
-				kv.mu.Unlock()
+			if !kv.getCheckIsLeader(reply, index) {
 				return
-			} else {
-				kv.mu.Unlock()
 			}
+		case <-timer:
+			return
 		}
 	}
+}
+
+func (kv *KVServer) getCheckIsLeader(reply *GetReply, index int) bool {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if _, isLeader := kv.rf.GetState(); !isLeader {
+		*reply = GetReply{WrongLeader: true, Err: ErrWrongLeader}
+		delete(kv.notifyCh, index)
+		return false
+	}
+	return true
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
@@ -205,10 +213,12 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	KVServerInfo("%s received: index -- %d, key: %x, value: %x", kv, op, index, args.Key, args.Value)
 	kv.mu.Unlock()
 
+	timer := time.After(KvServerWaitNotifyChTimeout)
+
 	for {
 		select {
-		// may not receive from $ch, just block here.
 		// TODO: add timeout when waiting $ch result
+		// may not receive from $ch, just block here.
 		case msg, ok := <-ch:
 			if !ok {
 				KVServerInfo("channel has been deleted in PutAppend", kv)
@@ -239,16 +249,13 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 		// KV Server and Raft in same process (goroutine) and crash at same time
 		case <-time.After(CheckIsLeaderTimeout):
-			kv.mu.Lock()
-			if _, isLeader := kv.rf.GetState(); !isLeader {
-				*reply = PutAppendReply{WrongLeader: true, Err: ErrWrongLeader}
-				//delete(kv.notifyCh, index)
-				kv.mu.Unlock()
+			if !kv.putAppendCheckIsLeader(reply, index) {
 				return
-			} else {
-				kv.mu.Unlock()
 			}
+		case <-timer:
+			return
 		}
+
 	}
 }
 
@@ -274,6 +281,7 @@ func (kv *KVServer) Kill() {
 	// Your code here, if desired.
 
 	kv.mu.Lock()
+	KVServerInfo("Killed!",kv)
 	defer kv.mu.Unlock()
 
 }
