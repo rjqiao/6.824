@@ -62,8 +62,8 @@ type Raft struct {
 
 	// Persistent on all servers
 	currentTerm int
-	votedFor    int
-	logs        [] LogEntry
+	votedFor    int			// -1 when this node is Follower and do not know who is leader and did not vote for leader
+	logs        []LogEntry
 
 	// volatile state on all servers
 	commitIndex int
@@ -132,15 +132,18 @@ func (rf *Raft) persist() {
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
 
-	buf := new(bytes.Buffer)
-	_ = gob.NewEncoder(buf).Encode(
-		RaftPersistence{
-			CurrentTerm: rf.currentTerm,
-			Logs:        rf.logs,
-			VotedFor:    rf.votedFor,
-		})
+	raftPersistence := RaftPersistence{
+		CurrentTerm: rf.currentTerm,
+		Logs:        rf.logs,
+		VotedFor:    rf.votedFor,
+	}
 
-	RaftDebug("Persisting node data (%d bytes)", rf, buf.Len())
+	buf := new(bytes.Buffer)
+	_ = gob.NewEncoder(buf).Encode(raftPersistence)
+
+	//RaftDebug("Persisting node data (%d bytes)", rf, buf.Len())
+	RaftDebug("Persisting node data, %v", rf, raftPersistence)
+
 	rf.persister.SaveRaftState(buf.Bytes())
 }
 
@@ -220,11 +223,11 @@ func (rf *Raft) transitionToCandidate() {
 	rf.votedFor = rf.me
 }
 
-func (rf *Raft) transitionToFollower(newTerm int) {
+func (rf *Raft) transitionToFollower(newTerm int, votedFor int) {
 	RaftInfo("transit to follower, new term: %d", rf, newTerm)
 	rf.status = Follower
 	rf.currentTerm = newTerm
-	rf.votedFor = -1
+	rf.votedFor = votedFor
 }
 
 // lock outside
@@ -253,8 +256,10 @@ func (rf *Raft) promoteToLeader() {
 }
 
 func (rf *Raft) setCommitIndexAndApplyStateMachine(commitIndex int) {
-	rf.commitIndex = commitIndex
-	RaftInfo("Commit to commitIndex: %d", rf, commitIndex)
+	if rf.commitIndex < commitIndex {
+		rf.commitIndex = commitIndex
+		RaftInfo("Commit to commitIndex: %d", rf, commitIndex)
+	}
 	go rf.applyLocalStateMachine()
 }
 
@@ -396,7 +401,7 @@ func (rf *Raft) buildAppendEntriesReplyWhenNotSuccess(reply *AppendEntriesReply,
 func (rf *Raft) buildAppendEntriesArgs(server int) *AppendEntriesArgs {
 	prevLogIndex := 0
 	prevLogTerm := 0
-	var entries []LogEntry
+	var entries []LogEntry = nil
 	leaderCommit := rf.commitIndex
 
 	// assert nextIndex[server]>=1  因为index 0的entry不存在
@@ -406,7 +411,10 @@ func (rf *Raft) buildAppendEntriesArgs(server int) *AppendEntriesArgs {
 		prevLogIndex = rf.getLastIndex()
 		prevLogTerm = rf.getLastTerm()
 	} else {
-		entries = rf.logs[(rf.nextIndex[server] - 1):]
+		entriesToCopy := rf.logs[(rf.nextIndex[server] - 1):]
+		entries = make([]LogEntry, len(entriesToCopy))
+		copy(entries, entriesToCopy)
+
 		prevLogIndex = rf.nextIndex[server] - 1
 		// assert rf.nextIndex[server] >= 1
 		if rf.nextIndex[server] <= 1 {
@@ -460,7 +468,7 @@ func (rf *Raft) updateNextIndexWhenAppendEntriesFail(server int, reply *AppendEn
 // lock outside
 func (rf *Raft) updateIndexesAndApplyWhenSuccess(server int, args *AppendEntriesArgs) {
 	if len(args.Entries) == 0 {
-		RaftInfo("heartbeat success to %d", rf, server, )
+		RaftInfo("heartbeat success to %d", rf, server)
 		return
 	}
 
@@ -468,7 +476,7 @@ func (rf *Raft) updateIndexesAndApplyWhenSuccess(server int, args *AppendEntries
 	lastIndexNewlyAppendToServer := args.Entries[len(args.Entries)-1].Index
 
 	rf.nextIndex[server] = lastIndexNewlyAppendToServer + 1
-	rf.matchIndex[server] = lastIndexNewlyAppendToServer
+	rf.matchIndex[server] = MaxInt(rf.matchIndex[server],lastIndexNewlyAppendToServer)
 
 	rf.updateCommitIndex()
 	RaftDebug("Send AppendEntries to %d ++: new matchIndex = %d, commitIndex = %d",
@@ -500,7 +508,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	isGoodRequestVote = true
 
 	if args.Term > rf.currentTerm {
-		rf.transitionToFollower(args.Term)
+		rf.transitionToFollower(args.Term, -1)
 	}
 
 	// assert(args.Term == rf.currentTerm)
@@ -546,7 +554,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	requestBlock := func() bool { return rf.peers[server].Call("Raft.RequestVote", args, reply) }
-	ok := SendRPCRequestWithRetry("Raft.RequestVote", RaftRPCTimeout, 5, requestBlock)
+	ok := SendRPCRequestWithRetry("Raft.RequestVote", RaftRPCTimeout, 1, requestBlock)
 	return ok
 }
 
@@ -575,7 +583,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	goodHeartBeat = true
 
 	if args.Term > rf.currentTerm {
-		rf.transitionToFollower(args.Term)
+		rf.transitionToFollower(args.Term, args.LeaderId)
 	}
 
 	RaftDebug("AppendEntries: args.LeaderCommit = %d", rf, args.LeaderCommit)
@@ -605,7 +613,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	requestBlock := func() bool { return rf.peers[server].Call("Raft.AppendEntries", args, reply) }
-	ok := SendRPCRequestWithRetry("Raft.AppendEntries", RaftRPCTimeout, 3, requestBlock)
+	ok := SendRPCRequestWithRetry("Raft.AppendEntries", RaftRPCTimeout, 1, requestBlock)
 	return ok
 }
 
@@ -648,7 +656,7 @@ func (rf *Raft) sendAndCollectAppendEntries(server int) bool {
 	}
 
 	if rf.currentTerm < reply.Term {
-		rf.transitionToFollower(reply.Term)
+		rf.transitionToFollower(reply.Term, server)
 		rf.persist()
 		isResetElectionTimer = true
 		return false
@@ -679,9 +687,11 @@ func (rf *Raft) sendAllAppendEntries() {
 	}
 }
 
+
 func (rf *Raft) heartbeatDaemonProcess() {
 	RaftDebug("heartbeat daemon started\n", rf)
 
+	f := CallWhenRepeatNTimes(10, func() {RaftDebug("heartbeat!\n", rf)})
 	for {
 		select {
 		case <-rf.killCh:
@@ -690,6 +700,7 @@ func (rf *Raft) heartbeatDaemonProcess() {
 		}
 
 		rf.mu.Lock()
+		f()
 		rf.sendAllAppendEntries()
 		rf.mu.Unlock()
 		// 后sleep！！！
@@ -742,10 +753,10 @@ func (rf *Raft) doElection() {
 			continue
 		}
 		go func(i int) {
-			RaftDebug("do Election %d -> %d, start term %d", rf, rf.me, i, args.Term)
+			//RaftDebug("do Election %d -> %d, start term %d", rf, rf.me, i, args.Term)
 			reply := &RequestVoteReply{}
 			ok := rf.sendRequestVote(i, args, reply)
-			RaftDebug("do Election reply %d -> %d, start-term %d, reply : %v", rf, rf.me, i, args.Term, reply)
+			//RaftDebug("do Election reply %d -> %d, start-term %d, reply : %v", rf, rf.me, i, args.Term, reply)
 			if !ok {
 				return
 			}
@@ -771,7 +782,7 @@ func (rf *Raft) doElection() {
 			// 是不是不需要？
 			// 其他人的term更加新
 			if rf.currentTerm < reply.Term {
-				rf.transitionToFollower(reply.Term)
+				rf.transitionToFollower(reply.Term, i)
 				rf.persist() // change term
 				isResetElectionTimer = true
 				return
@@ -863,7 +874,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	rf.commitIndex = 0
 	rf.lastApplied = 0
-	rf.transitionToFollower(0)
+	rf.transitionToFollower(0, -1)
 	rf.applyCh = applyCh
 	rf.applyChBuffer = make(chan ApplyMsg, 500)
 
@@ -874,13 +885,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-	go rf.electionDaemonProcess()
-	go rf.applyFromChBufferToChDaemon()
-
 	RaftInfo("Started server", rf)
 
 	// debug only
 	rf.nanoSecCreated = time.Now().UnixNano()
+
+	go rf.electionDaemonProcess()
+	go rf.applyFromChBufferToChDaemon()
 
 	return rf
 }

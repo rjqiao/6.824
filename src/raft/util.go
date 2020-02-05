@@ -56,33 +56,19 @@ func RaftDebug(format string, rf *Raft, a ...interface{}) {
 	return
 }
 
-func SendRPCRequest(requestName string, rpcTimeout time.Duration, requestBlock func() bool) bool {
-	ch := make(chan bool, 1)
-	exit := make(chan bool, 1)
-
-	go func() {
-		select {
-		case ch <- requestBlock():
-		case <-exit:
-			return
+func CallWhenRepeatNTimes(n int,f func()) func() {
+	count := 0
+	return func() {
+		count++
+		if count % 10 == 0 {
+			f()
 		}
-		// some code if requestBlock() finishes in timeout
-
-		return
-	}()
-
-	select {
-	case ok := <-ch:
-		return ok
-	case <-time.After(rpcTimeout):
-		exit <- true
-		return false
 	}
 }
 
 func SendRPCRequestWithRetry(requestName string, rpcTimeout time.Duration, retryTimes int, requestBlock func() bool) bool {
 	for i:=0;i<retryTimes;i++ {
-		if SendRPCRequest(requestName, rpcTimeout, requestBlock) {
+		if requestBlock() {
 			return true
 		}
 	}
