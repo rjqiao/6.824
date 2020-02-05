@@ -62,7 +62,7 @@ type Raft struct {
 
 	// Persistent on all servers
 	currentTerm int
-	votedFor    int			// -1 when this node is Follower and do not know who is leader and did not vote for leader
+	votedFor    int // -1 when this node is Follower and do not know who is leader and did not vote for leader
 	logs        []LogEntry
 
 	// volatile state on all servers
@@ -476,7 +476,7 @@ func (rf *Raft) updateIndexesAndApplyWhenSuccess(server int, args *AppendEntries
 	lastIndexNewlyAppendToServer := args.Entries[len(args.Entries)-1].Index
 
 	rf.nextIndex[server] = lastIndexNewlyAppendToServer + 1
-	rf.matchIndex[server] = MaxInt(rf.matchIndex[server],lastIndexNewlyAppendToServer)
+	rf.matchIndex[server] = MaxInt(rf.matchIndex[server], lastIndexNewlyAppendToServer)
 
 	rf.updateCommitIndex()
 	RaftDebug("Send AppendEntries to %d ++: new matchIndex = %d, commitIndex = %d",
@@ -687,11 +687,10 @@ func (rf *Raft) sendAllAppendEntries() {
 	}
 }
 
-
 func (rf *Raft) heartbeatDaemonProcess() {
 	RaftDebug("heartbeat daemon started\n", rf)
 
-	f := CallWhenRepeatNTimes(10, func() {RaftDebug("heartbeat!\n", rf)})
+	f := CallWhenRepeatNTimes(10, func() { RaftDebug("heartbeat!\n", rf) })
 	for {
 		select {
 		case <-rf.killCh:

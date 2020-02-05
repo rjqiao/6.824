@@ -15,13 +15,13 @@ const (
 )
 
 const (
-	RaftRPCTimeout   = 50 * time.Millisecond
-	HeartbeatTimeout = 120 * time.Millisecond
-	electionBaseTimeout = 400 * time.Millisecond
+	RaftRPCTimeout        = 50 * time.Millisecond
+	HeartbeatTimeout      = 120 * time.Millisecond
+	electionBaseTimeout   = 400 * time.Millisecond
 	electionRandomTimeout = 400 * time.Millisecond
 )
 
-type LeaderBroadcastCommand struct{};
+type LeaderBroadcastCommand struct{}
 
 func init() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
@@ -56,18 +56,18 @@ func RaftDebug(format string, rf *Raft, a ...interface{}) {
 	return
 }
 
-func CallWhenRepeatNTimes(n int,f func()) func() {
+func CallWhenRepeatNTimes(n int, f func()) func() {
 	count := 0
 	return func() {
 		count++
-		if count % 10 == 0 {
+		if count%10 == 0 {
 			f()
 		}
 	}
 }
 
 func SendRPCRequestWithRetry(requestName string, rpcTimeout time.Duration, retryTimes int, requestBlock func() bool) bool {
-	for i:=0;i<retryTimes;i++ {
+	for i := 0; i < retryTimes; i++ {
 		if requestBlock() {
 			return true
 		}
