@@ -621,6 +621,7 @@ func (rf *Raft) sendAndCollectAppendEntries(server int) bool {
 	rf.mu.Lock()
 
 	if rf.status != Leader {
+		rf.mu.Unlock()
 		return false
 	}
 
