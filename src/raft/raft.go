@@ -27,7 +27,7 @@ import (
 import "labrpc"
 
 func init() {
-	//rand.Seed(time.Now().UTC().UnixNano())
+	rand.Seed(time.Now().UTC().UnixNano())
 }
 
 //
@@ -76,10 +76,9 @@ type Raft struct {
 	// others
 	status int
 
-	applyChBuffer chan ApplyMsg
-	applyCh       chan<- ApplyMsg
+	applyCh chan<- ApplyMsg
 
-	resetElectionTimer chan bool
+	electionTimer chan bool
 
 	killCh chan bool
 
@@ -234,7 +233,7 @@ func (rf *Raft) transitionToFollower(newTerm int, votedFor int) {
 // assert rf.status != Leader
 func (rf *Raft) promoteToLeader() {
 	if rf.status == Leader {
-		return
+		panic("Should not become leader when already leader")
 	}
 
 	rf.status = Leader
@@ -255,30 +254,29 @@ func (rf *Raft) promoteToLeader() {
 	go rf.heartbeatDaemonProcess()
 }
 
+// locked outside
 func (rf *Raft) setCommitIndexAndApplyStateMachine(commitIndex int) {
 	if rf.commitIndex < commitIndex {
 		rf.commitIndex = commitIndex
 		RaftInfo("Commit to commitIndex: %d", rf, commitIndex)
 	}
-	go rf.applyLocalStateMachine()
+	rf.applyLocalStateMachine()
 }
 
 func (rf *Raft) isUptoDate(cIndex int, cTerm int) bool {
 	term, index := rf.getLastTerm(), rf.getLastIndex()
 	if cTerm == term {
 		return cIndex >= index
-	} else {
-		return cTerm >= term
 	}
+	return cTerm >= term
 }
 
 // assert 0 <= index <= rf.getLastIndex()
 func (rf *Raft) getTermForIndex(index int) int {
 	if index == 0 {
 		return 0
-	} else {
-		return rf.logs[index-1].Term
 	}
+	return rf.logs[index-1].Term
 }
 
 func (rf *Raft) getLastIndex() int {
@@ -318,9 +316,9 @@ func (rf *Raft) updateCommitIndex() {
 	}
 }
 
+// locked outside
 // send to rf.applyCh
 func (rf *Raft) applyLocalStateMachine() {
-	rf.mu.Lock()
 	if rf.commitIndex > 0 && rf.commitIndex > rf.lastApplied {
 		entries := make([]LogEntry, rf.commitIndex-rf.lastApplied)
 		commitIndexInThisApply := rf.commitIndex
@@ -330,29 +328,22 @@ func (rf *Raft) applyLocalStateMachine() {
 		RaftInfo("Locally applying %d log entries. lastApplied: %d. commitIndex: %d",
 			rf, len(entries), rf.lastApplied, rf.commitIndex)
 
-		rf.mu.Unlock()
-		for _, log := range entries {
-			rf.applyChBuffer <- ApplyMsg{CommandValid: true, CommandIndex: log.Index, Command: log.Command}
-		}
-		rf.mu.Lock()
-		rf.lastApplied = MaxInt(rf.lastApplied, commitIndexInThisApply)
-		rf.mu.Unlock()
-	} else {
-		rf.mu.Unlock()
+		go func() {
+			for _, log := range entries {
+				select {
+				case <-rf.killCh:
+					return
+				case rf.applyCh <- ApplyMsg{CommandValid: true, CommandIndex: log.Index, Command: log.Command}:
+				}
+			}
+			rf.mu.Lock()
+			rf.lastApplied = MaxInt(rf.lastApplied, commitIndexInThisApply)
+			rf.mu.Unlock()
+		}()
 	}
 }
 
-func (rf *Raft) applyFromChBufferToChDaemon() {
-	for msg := range rf.applyChBuffer {
-		select {
-		case rf.applyCh <- msg:
-
-		case <-rf.killCh:
-			return
-		}
-	}
-}
-
+// locked outside
 func (rf *Raft) updateLogAndCommitIndexWhenReceivingAppendEntriesSuccess(Entries []LogEntry, PrevLogIndex, LeaderCommit int) {
 	commitIndexToUpdate := LeaderCommit
 	if len(Entries) != 0 {
@@ -396,7 +387,7 @@ func (rf *Raft) buildAppendEntriesReplyWhenNotSuccess(reply *AppendEntriesReply,
 	}
 }
 
-// lock inside
+// lock outside
 // no side effect
 func (rf *Raft) buildAppendEntriesArgs(server int) *AppendEntriesArgs {
 	prevLogIndex := 0
@@ -496,7 +487,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer func() {
 		rf.mu.Unlock()
 		if isGoodRequestVote {
-			rf.resetElectionTimer <- true
+			rf.electionTimer <- true
 		}
 	}()
 
@@ -561,12 +552,9 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	goodHeartBeat := false
 	rf.mu.Lock()
-
 	defer func() {
 		rf.mu.Unlock()
-		if goodHeartBeat {
-			rf.resetElectionTimer <- true
-		}
+		rf.resetElectionTimerIf(goodHeartBeat)
 	}()
 
 	if args.Term < rf.currentTerm {
@@ -593,13 +581,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// check PrevLogIndex and PrevLogTerm
 	if (args.PrevLogIndex == 0) ||
 		(args.PrevLogIndex <= rf.getLastIndex() && args.PrevLogTerm == rf.getTermForIndex(args.PrevLogIndex)) {
-
-		lastCommand := -1
-		if len(args.Entries) != 0 {
-			lastCommand = args.Entries[len(args.Entries)-1].Command.(int)
-		}
-		RaftInfo("AppendEntries: args.LeaderCommit = %d, lastLogCommand: %d", rf, args.LeaderCommit, lastCommand)
-
 		// no conflict
 		reply.Success = true
 		rf.updateLogAndCommitIndexWhenReceivingAppendEntriesSuccess(args.Entries, args.PrevLogIndex, args.LeaderCommit)
@@ -617,31 +598,31 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	return ok
 }
 
-func (rf *Raft) sendAndCollectAppendEntries(server int) bool {
+func (rf *Raft) beforeSendAppendEntries(server int) (*AppendEntriesArgs, bool) {
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
 	if rf.status != Leader {
-		rf.mu.Unlock()
-		return false
+		return nil, false
 	}
+	return rf.buildAppendEntriesArgs(server), true
+}
 
-	args := rf.buildAppendEntriesArgs(server)
-
-	rf.mu.Unlock()
-
-	reply := &AppendEntriesReply{}
-	ok := rf.sendAppendEntries(server, args, reply)
-	if !ok {
-		return ok
+func (rf *Raft) resetElectionTimerIf(b bool) {
+	if b {
+		select {
+		case <-rf.killCh:
+		case rf.electionTimer <- true:
+		}
 	}
+}
 
+func (rf *Raft) afterSendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	isResetElectionTimer := false
 	rf.mu.Lock()
 	defer func() {
 		rf.mu.Unlock()
-		if isResetElectionTimer {
-			rf.resetElectionTimer <- true
-		}
+		rf.resetElectionTimerIf(isResetElectionTimer)
 	}()
 
 	RaftDebug("Send AppendEntries to %d ++: reply = %v", rf, server, reply)
@@ -672,7 +653,22 @@ func (rf *Raft) sendAndCollectAppendEntries(server int) bool {
 		rf.updateNextIndexWhenAppendEntriesFail(server, reply)
 	}
 
-	return ok
+	return true
+}
+
+func (rf *Raft) sendAndCollectAppendEntries(server int) bool {
+	args, ok := rf.beforeSendAppendEntries(server)
+	if !ok {
+		return ok
+	}
+
+	reply := &AppendEntriesReply{}
+	ok = rf.sendAppendEntries(server, args, reply)
+	if !ok {
+		return ok
+	}
+
+	return rf.afterSendAppendEntries(server, args, reply)
 }
 
 // No lock inside, should add lock outside
@@ -691,7 +687,6 @@ func (rf *Raft) sendAllAppendEntries() {
 func (rf *Raft) heartbeatDaemonProcess() {
 	RaftDebug("heartbeat daemon started\n", rf)
 
-	f := CallWhenRepeatNTimes(10, func() { RaftDebug("heartbeat!\n", rf) })
 	for {
 		select {
 		case <-rf.killCh:
@@ -700,7 +695,7 @@ func (rf *Raft) heartbeatDaemonProcess() {
 		}
 
 		rf.mu.Lock()
-		f()
+		CallWhenRepeatNTimes(10, func() { RaftDebug("heartbeat!\n", rf) })()
 		rf.sendAllAppendEntries()
 		rf.mu.Unlock()
 		// 后sleep！！！
@@ -715,22 +710,22 @@ func (rf *Raft) electionDaemonProcess() {
 	for {
 		currTimeout := electionTimeout()
 		select {
+		case <-rf.killCh:
+			return
 		case <-time.After(currTimeout):
 			// 需不需要其他条件？比如时间
 			// check is leader inside
 			go rf.doElection()
-		case <-rf.killCh:
-			return
 		// 重置timeout
-		case <-rf.resetElectionTimer:
+		case <-rf.electionTimer:
 		}
 	}
 }
 
 func (rf *Raft) doElection() {
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if rf.status == Leader {
-		rf.mu.Unlock()
 		return
 	}
 
@@ -745,7 +740,6 @@ func (rf *Raft) doElection() {
 	}
 
 	rf.persist() // because transiting to Candidate, currentTerm++
-	rf.mu.Unlock()
 
 	var voteCount = 1
 	for i := range rf.peers {
@@ -765,9 +759,7 @@ func (rf *Raft) doElection() {
 			rf.mu.Lock()
 			defer func() {
 				rf.mu.Unlock()
-				if isResetElectionTimer {
-					rf.resetElectionTimer <- true
-				}
+				rf.resetElectionTimerIf(isResetElectionTimer)
 			}()
 
 			// 是不是不需要？
@@ -876,9 +868,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastApplied = 0
 	rf.transitionToFollower(0, -1)
 	rf.applyCh = applyCh
-	rf.applyChBuffer = make(chan ApplyMsg, 500)
 
-	rf.resetElectionTimer = make(chan bool, 100)
+	rf.electionTimer = make(chan bool, 100)
 
 	rf.killCh = make(chan bool)
 
@@ -891,7 +882,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.nanoSecCreated = time.Now().UnixNano()
 
 	go rf.electionDaemonProcess()
-	go rf.applyFromChBufferToChDaemon()
 
 	return rf
 }
