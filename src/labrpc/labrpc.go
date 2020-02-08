@@ -101,6 +101,7 @@ func (e *ClientEnd) Call(svcMeth string, args interface{}, reply interface{}) bo
 	}
 
 	rep := <-req.replyCh
+	//log.Printf("REPLY2: %v\n", rep)
 	if rep.ok {
 		rb := bytes.NewBuffer(rep.reply)
 		rd := labgob.NewDecoder(rb)
@@ -109,6 +110,7 @@ func (e *ClientEnd) Call(svcMeth string, args interface{}, reply interface{}) bo
 		}
 		return true
 	} else {
+		//panic("rep should be true")
 		return false
 	}
 }
@@ -216,6 +218,7 @@ func (rn *Network) ProcessReq(req reqMsg) {
 
 		if reliable == false && (rand.Int()%1000) < 100 {
 			// drop the request, return as if timeout
+			//panic("Something wrong in reliable")
 			req.replyCh <- replyMsg{false, nil}
 			return
 		}
@@ -239,6 +242,7 @@ func (rn *Network) ProcessReq(req reqMsg) {
 		for replyOK == false && serverDead == false {
 			select {
 			case reply = <-ech:
+				//log.Printf("REPLY: %v\n", reply)
 				replyOK = true
 			case <-time.After(100 * time.Millisecond):
 				serverDead = rn.IsServerDead(req.endname, servername, server)
@@ -247,6 +251,7 @@ func (rn *Network) ProcessReq(req reqMsg) {
 						<-ech // drain channel to let the goroutine created earlier terminate
 					}()
 				}
+				//panic("Something wrong in <-ech timeout")
 			}
 		}
 
@@ -260,9 +265,13 @@ func (rn *Network) ProcessReq(req reqMsg) {
 
 		if replyOK == false || serverDead == true {
 			// server was killed while we were waiting; return error.
+
+			//panic("Something wrong in replyOK || serverDead")
 			req.replyCh <- replyMsg{false, nil}
 		} else if reliable == false && (rand.Int()%1000) < 100 {
 			// drop the reply, return as if timeout
+
+			//panic("Something wrong in reliable 2")
 			req.replyCh <- replyMsg{false, nil}
 		} else if longreordering == true && rand.Intn(900) < 600 {
 			// delay the response for a while
@@ -271,6 +280,7 @@ func (rn *Network) ProcessReq(req reqMsg) {
 			// the number of goroutines, so that the race
 			// detector is less likely to get upset.
 			time.AfterFunc(time.Duration(ms)*time.Millisecond, func() {
+				//panic("Something wrong in timeout 2")
 				req.replyCh <- reply
 			})
 		} else {
@@ -289,6 +299,7 @@ func (rn *Network) ProcessReq(req reqMsg) {
 			ms = (rand.Int() % 100)
 		}
 		time.AfterFunc(time.Duration(ms)*time.Millisecond, func() {
+			//panic("Something wrong in timeout")
 			req.replyCh <- replyMsg{false, nil}
 		})
 	}
