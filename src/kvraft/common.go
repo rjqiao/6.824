@@ -66,7 +66,7 @@ type GetReply struct {
 	Value       string
 }
 
-const Debug = 1
+const Debug = 0
 
 func KVServerInfo(format string, kv *KVServer, a ...interface{}) {
 	if Debug > 0 {

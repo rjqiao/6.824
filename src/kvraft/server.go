@@ -1,12 +1,12 @@
 package raftkv
 
 import (
+	"fmt"
 	"labgob"
 	"labrpc"
 	"raft"
 	"sync"
 	"time"
-	"fmt"
 )
 
 type Operation int
@@ -27,7 +27,7 @@ type KVServer struct {
 	latestRequests        map[int64]RaftKVCommand    // ClerkId -> ReqSeq
 	latestAppliedLogIndex int                        // logIndex last applied
 
-	killCh				  chan bool
+	killCh chan bool
 }
 
 func (kv *KVServer) handleApplyMsg() {
@@ -60,7 +60,7 @@ func (kv *KVServer) handleApplyMsg() {
 				} else {
 					if lastCommand.Key != command.Key {
 						panic(fmt.Sprintf("Key should be same, ClerkId: %d, ReqSeq: %d, Op: %s, Key: %s, Value: %s, CommitIndex: %d, ",
-						command.ClerkId, command.RequestSeq, command.Op, command.Key, command.Value, msg.CommandIndex))
+							command.ClerkId, command.RequestSeq, command.Op, command.Key, command.Value, msg.CommandIndex))
 					}
 					command.Value = lastCommand.Value
 					KVServerInfo("In db (dup) -- Op: %s, Key: %s, Value: %s", kv, command.Op, command.Key, command.Value)
@@ -78,7 +78,7 @@ func (kv *KVServer) handleApplyMsg() {
 				go func() {
 					timeout := 500 * time.Millisecond
 					select {
-					case ch<-msg:
+					case ch <- msg:
 					case <-time.After(timeout):
 					}
 					// producer close the channel
@@ -93,6 +93,8 @@ func (kv *KVServer) handleApplyMsg() {
 	}
 }
 
+
+// timeout in KvServerWaitNotifyChTimeout
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 
@@ -131,6 +133,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	timer := time.After(KvServerWaitNotifyChTimeout)
 	for {
 		select {
+		// what if
 		case msg, ok := <-ch:
 			if !ok {
 				KVServerInfo("channel has been deleted in Get", kv)
@@ -141,19 +144,19 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			notifiedCommand := msg.Command.(RaftKVCommand)
 			// make sure $command (receive from $ch) is the same (reqSeq, clerkId) one
 			if notifiedCommand.RequestSeq != command.RequestSeq || notifiedCommand.ClerkId != command.ClerkId {
-				panic("should not happen! The command received should have same (reqSeq, clerkId) pair")
+				//panic("should not happen! The command received should have same (reqSeq, clerkId) pair")
+
+				// stale channel, early finish
+				KVServerInfo("command has different (reqSeq, clerkId) pair, (%d,%d)!=(%d,%d)",
+					kv, notifiedCommand.RequestSeq, notifiedCommand.ClerkId, command.RequestSeq, command.ClerkId)
+				*reply = GetReply{WrongLeader: false, Err: ErrStaleIndex}
+				return
 			}
 
 			KVServerInfo("Got reply -- Op: %s, ClerkId: %d. ReqSeq: %d, Key: %x, Value: %x", kv,
 				notifiedCommand.Op, notifiedCommand.ClerkId, notifiedCommand.RequestSeq, notifiedCommand.Key, notifiedCommand.Value)
 
-			// might happen !!!  ??
-			if notifiedCommand.RequestSeq != command.RequestSeq ||
-				notifiedCommand.ClerkId != command.ClerkId {
-				panic("should not happen! notifiedCommand != command")
-			}
-			*reply = GetReply{WrongLeader: false, Err: OK, Value: notifiedCommand.Value,}
-
+			*reply = GetReply{WrongLeader: false, Err: OK, Value: notifiedCommand.Value}
 			return
 
 		case <-time.After(CheckIsLeaderTimeout):
@@ -242,9 +245,15 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 			// make sure $command (receive from $ch) is the same (reqSeq, clerkId) one
 			if notifiedCommand.RequestSeq != command.RequestSeq || notifiedCommand.ClerkId != command.ClerkId {
-				panic("should not happen! The command received should have same (reqSeq, clerkId) pair")
+				//panic("should not happen! The command received should have same (reqSeq, clerkId) pair")
 				//*reply = PutAppendReply{WrongLeader: true, Err: ErrUnknown}
 				//return
+
+				// stale channel, early finish
+				KVServerInfo("command has different (reqSeq, clerkId) pair, (%d,%d)!=(%d,%d)",
+					kv, notifiedCommand.RequestSeq, notifiedCommand.ClerkId, command.RequestSeq, command.ClerkId)
+				*reply = PutAppendReply{WrongLeader: false, Err: ErrStaleIndex}
+				return
 			}
 
 			*reply = PutAppendReply{WrongLeader: false, Err: OK}
@@ -290,7 +299,7 @@ func (kv *KVServer) Kill() {
 	// Your code here, if desired.
 	close(kv.killCh)
 	kv.mu.Lock()
-	KVServerInfo("Killed!",kv)
+	KVServerInfo("Killed!", kv)
 	defer kv.mu.Unlock()
 
 }
