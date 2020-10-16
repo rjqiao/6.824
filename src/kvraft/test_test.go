@@ -1,4 +1,4 @@
-package raftkv
+package kvraft
 
 import "linearizability"
 
@@ -609,6 +609,7 @@ func TestSnapshotRPC3B(t *testing.T) {
 
 	// a bunch of puts into the majority partition.
 	cfg.partition([]int{0, 1}, []int{2})
+	log.Print("partition 0,1 | 2")
 	{
 		ck1 := cfg.makeClient([]int{0, 1})
 		for i := 0; i < 50; i++ {
@@ -627,6 +628,7 @@ func TestSnapshotRPC3B(t *testing.T) {
 	// now make group that requires participation of
 	// lagging server, so that it has to catch up.
 	cfg.partition([]int{0, 2}, []int{1})
+	log.Print("partition 0,2 | 1")
 	{
 		ck1 := cfg.makeClient([]int{0, 2})
 		Put(cfg, ck1, "c", "C")

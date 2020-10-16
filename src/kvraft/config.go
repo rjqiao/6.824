@@ -1,4 +1,4 @@
-package raftkv
+package kvraft
 
 import "labrpc"
 import "testing"

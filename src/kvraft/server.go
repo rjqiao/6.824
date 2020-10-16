@@ -1,6 +1,8 @@
-package raftkv
+package kvraft
 
 import (
+	"bytes"
+	"encoding/gob"
 	"labgob"
 	"labrpc"
 	"raft"
@@ -11,6 +13,7 @@ import (
 type Operation int
 
 type KVServer struct {
+	// if we want to get kv.rf.mu, first get kv.mu
 	mu      sync.Mutex
 	me      int
 	rf      *raft.Raft
@@ -24,9 +27,66 @@ type KVServer struct {
 	data                  map[string]string          // Key -> Value
 	notifyCh              map[int]chan raft.ApplyMsg // logIndex -> channel
 	latestRequests        map[int64]RaftKVCommand    // ClerkId -> ReqSeq
+	// TODO: do not need $latestAppliedLogIndex?
 	latestAppliedLogIndex int                        // logIndex last applied
 
+	//snapshotIndex int
+
 	killCh chan bool
+}
+
+type SnapShotPersistence struct {
+	Data                  map[string]string
+	LatestAppliedLogIndex int
+	LatestRequests        map[int64]RaftKVCommand
+}
+
+func (kv *KVServer) needSnapShot() bool {
+	if kv.maxraftstate < 0 {
+		return false
+	}
+	KVServerForce("kv.rf.Persister.RaftStateSize()=%d, kv.maxraftstate=%d", kv, kv.rf.Persister.RaftStateSize(), kv.maxraftstate)
+	if kv.rf.Persister.RaftStateSize() > kv.maxraftstate {
+		return true
+	}
+	diff := kv.maxraftstate - kv.rf.Persister.RaftStateSize()
+	threshold := kv.maxraftstate / 10
+	return diff < threshold
+}
+
+// should hold lock outside
+func (kv *KVServer) generateSnapshotAndApplyToRaft() {
+
+	snapShotPersistence := SnapShotPersistence{
+		Data:                  kv.data,
+		LatestAppliedLogIndex: kv.latestAppliedLogIndex,
+		LatestRequests:        kv.latestRequests,
+
+		//SnapShotIndex:         index,
+	}
+	buf := new(bytes.Buffer)
+	_ = gob.NewEncoder(buf).Encode(snapShotPersistence)
+
+	kv.rf.PersistSnapshotAndDiscardLogs(kv.latestAppliedLogIndex, buf.Bytes())
+}
+
+func (kv *KVServer) applySnapshot(data []byte) {
+	if data == nil || len(data) < 1 { // bootstrap without any state?
+		return
+	}
+
+	snapShotPersistence := SnapShotPersistence{}
+
+	r := bytes.NewBuffer(data)
+	d := gob.NewDecoder(r)
+	_ = d.Decode(&snapShotPersistence)
+
+	kv.data = snapShotPersistence.Data
+	KVServerForce("latestAppliedLogIndex=%d, snapShotPersistence.LatestAppliedLogIndex=%d",kv, kv.latestAppliedLogIndex, snapShotPersistence.LatestAppliedLogIndex)
+	kv.latestAppliedLogIndex = snapShotPersistence.LatestAppliedLogIndex
+	kv.latestRequests = snapShotPersistence.LatestRequests
+
+	//kv.snapshotIndex = snapShotPersistence.SnapShotIndex
 }
 
 func (kv *KVServer) handleApplyMsg() {
@@ -34,9 +94,17 @@ func (kv *KVServer) handleApplyMsg() {
 		select {
 		case <-kv.killCh:
 			return
-		case msg,ok := <-kv.applyCh:
+		case msg, ok := <-kv.applyCh:
 			if !ok {
 				return
+			}
+			if !msg.CommandValid {
+				kv.mu.Lock()
+				// got a snapshot
+				raft.PanicIfF(msg.Snapshot == nil, "msg.Snapshot==nil")
+				kv.applySnapshot(msg.Snapshot)
+				kv.mu.Unlock()
+				continue
 			}
 
 			// Is it here to change view of state machine? Yes
@@ -51,32 +119,41 @@ func (kv *KVServer) handleApplyMsg() {
 			raft.AssertF(kv.latestAppliedLogIndex == msg.CommandIndex-1,
 				"kv.latestAppliedLogIndex{%d} == msg.CommandIndex {%d} -1 -- Failed!", kv.latestAppliedLogIndex, msg.CommandIndex)
 
-			if kv.latestAppliedLogIndex >= msg.CommandIndex {
-				KVServerInfo("Obsolete Apply: %d", kv, msg.CommandIndex)
-			} else {
-				if lastCommand, ok := kv.latestRequests[command.ClerkId]; !ok || lastCommand.RequestSeq != command.RequestSeq {
-					switch command.Op {
-					case "Put":
-						kv.data[command.Key] = command.Value
-					case "Append":
-						kv.data[command.Key] += command.Value // What happen when nil?
-					}
-					command.Value = kv.data[command.Key]
-					KVServerInfo("In db (non dup) -- Op: %s, Key: %s, Value: %s", kv, command.Op, command.Key, command.Value)
-					kv.latestRequests[command.ClerkId] = command
-				} else {
-					raft.PanicIfF(lastCommand.Key != command.Key,
-						"Key should be same, ClerkId: %d, ReqSeq: %d, Op: %s, Key: %s, Value: %s, CommitIndex: %d, ",
-						command.ClerkId, command.RequestSeq, command.Op, command.Key, command.Value, msg.CommandIndex)
-					command.Value = lastCommand.Value
-					KVServerInfo("In db (dup) -- Op: %s, Key: %s, Value: %s", kv, command.Op, command.Key, command.Value)
+			raft.PanicIfF(kv.latestAppliedLogIndex != msg.CommandIndex-1,
+				"not in order. kv.latestAppliedLogIndex=%d, msg.CommandIndex=%d",
+				kv.latestAppliedLogIndex, msg.CommandIndex)
+
+
+			if lastCommand, ok := kv.latestRequests[command.ClerkId]; !ok || lastCommand.RequestSeq != command.RequestSeq {
+				switch command.Op {
+				case "Put":
+					kv.data[command.Key] = command.Value
+				case "Append":
+					kv.data[command.Key] += command.Value // What happen when nil?
 				}
-				msg.Command = command
-				kv.latestAppliedLogIndex = msg.CommandIndex
+				command.Value = kv.data[command.Key] // case "Get"
+				KVServerInfo("In db (non dup) -- Op: %s, Key: %s, Value: %s", kv, command.Op, command.Key, command.Value)
+				kv.latestRequests[command.ClerkId] = command
+			} else {
+				raft.PanicIfF(lastCommand.Key != command.Key,
+					"Key should be same, ClerkId: %d, ReqSeq: %d, Op: %s, Key: %s, Value: %s, CommitIndex: %d, ",
+					command.ClerkId, command.RequestSeq, command.Op, command.Key, command.Value, msg.CommandIndex)
+				command.Value = lastCommand.Value
+				KVServerInfo("In db (dup) -- Op: %s, Key: %s, Value: %s", kv, command.Op, command.Key, command.Value)
+			}
+			msg.Command = command
+			kv.latestAppliedLogIndex = msg.CommandIndex
+
+
+			// check and generate snapshot (after new applied)
+			if kv.needSnapShot() {
+				// TODO: really need the commandIndex?
+				// No, we do not
+				kv.generateSnapshotAndApplyToRaft()
 			}
 
 			// !ok
-			// 1. Not leader, so no kv.notifCh[msg.CommandIndex] created
+			// 1. Not leader, so no kv.notifyCh[msg.CommandIndex] created
 			// 2. stale or short cut request ??
 			if ch, ok := kv.notifyCh[msg.CommandIndex]; ok {
 				delete(kv.notifyCh, msg.CommandIndex)
@@ -215,8 +292,8 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	KVServerInfo("%s received: index -- %d, key: %s, value: %s, isLeader: %t", kv, op, index, args.Key, args.Value, isLeader)
 
 	if !isLeader {
-		*reply = PutAppendReply{WrongLeader: true, Err: ErrWrongLeader}
 		kv.mu.Unlock()
+		*reply = PutAppendReply{WrongLeader: true, Err: ErrWrongLeader}
 		return
 	}
 
@@ -279,7 +356,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 				delete(kv.notifyCh, index)
 			}
 			kv.mu.Unlock()
-			*reply = PutAppendReply{WrongLeader: false, Err:ErrUnknown}
+			*reply = PutAppendReply{WrongLeader: false, Err: ErrUnknown}
 			return
 		}
 
@@ -338,17 +415,21 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 
-	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-
-	// You may need initialization code here.
-
 	kv.data = make(map[string]string)
 	kv.notifyCh = make(map[int]chan raft.ApplyMsg)
 	kv.latestRequests = make(map[int64]RaftKVCommand)
 	kv.latestAppliedLogIndex = 0
 
+	//kv.snapshotIndex = 0
+
 	kv.killCh = make(chan bool)
+
+	// You may need initialization code here.
+
+	// 不应该在开始的时候install snapshot？
+	//kv.applySnapshot(persister.ReadSnapshot())
+	kv.applyCh = make(chan raft.ApplyMsg, 1000)
+	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	go kv.handleApplyMsg()
 	return kv
