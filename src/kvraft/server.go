@@ -1,7 +1,6 @@
 package raftkv
 
 import (
-	"fmt"
 	"labgob"
 	"labrpc"
 	"raft"
@@ -35,7 +34,11 @@ func (kv *KVServer) handleApplyMsg() {
 		select {
 		case <-kv.killCh:
 			return
-		case msg := <-kv.applyCh:
+		case msg,ok := <-kv.applyCh:
+			if !ok {
+				return
+			}
+
 			// Is it here to change view of state machine? Yes
 			command := msg.Command.(RaftKVCommand)
 
@@ -43,6 +46,10 @@ func (kv *KVServer) handleApplyMsg() {
 
 			KVServerInfo("get from ApplyCh, ClerkId: %d, ReqSeq: %d, Op: %s, Key: %s, Value: %s, CommitIndex: %d", kv,
 				command.ClerkId, command.RequestSeq, command.Op, command.Key, command.Value, msg.CommandIndex)
+
+			raft.AssertF(kv.latestAppliedLogIndex < msg.CommandIndex, "should not see obsolete apply")
+			raft.AssertF(kv.latestAppliedLogIndex == msg.CommandIndex-1,
+				"kv.latestAppliedLogIndex{%d} == msg.CommandIndex {%d} -1 -- Failed!", kv.latestAppliedLogIndex, msg.CommandIndex)
 
 			if kv.latestAppliedLogIndex >= msg.CommandIndex {
 				KVServerInfo("Obsolete Apply: %d", kv, msg.CommandIndex)
@@ -58,10 +65,9 @@ func (kv *KVServer) handleApplyMsg() {
 					KVServerInfo("In db (non dup) -- Op: %s, Key: %s, Value: %s", kv, command.Op, command.Key, command.Value)
 					kv.latestRequests[command.ClerkId] = command
 				} else {
-					if lastCommand.Key != command.Key {
-						panic(fmt.Sprintf("Key should be same, ClerkId: %d, ReqSeq: %d, Op: %s, Key: %s, Value: %s, CommitIndex: %d, ",
-							command.ClerkId, command.RequestSeq, command.Op, command.Key, command.Value, msg.CommandIndex))
-					}
+					raft.PanicIfF(lastCommand.Key != command.Key,
+						"Key should be same, ClerkId: %d, ReqSeq: %d, Op: %s, Key: %s, Value: %s, CommitIndex: %d, ",
+						command.ClerkId, command.RequestSeq, command.Op, command.Key, command.Value, msg.CommandIndex)
 					command.Value = lastCommand.Value
 					KVServerInfo("In db (dup) -- Op: %s, Key: %s, Value: %s", kv, command.Op, command.Key, command.Value)
 				}
@@ -92,7 +98,6 @@ func (kv *KVServer) handleApplyMsg() {
 		}
 	}
 }
-
 
 // timeout in KvServerWaitNotifyChTimeout
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -161,6 +166,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 		case <-time.After(CheckIsLeaderTimeout):
 			if !kv.getCheckIsLeader(reply, index) {
+				*reply = GetReply{WrongLeader: true, Err: ErrWrongLeader, Value: ""}
 				return
 			}
 		case <-timer:
@@ -169,6 +175,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 				delete(kv.notifyCh, index)
 			}
 			kv.mu.Unlock()
+			*reply = GetReply{WrongLeader: false, Err: ErrUnknown, Value: ""}
 			return
 		}
 	}
@@ -257,13 +264,13 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			}
 
 			*reply = PutAppendReply{WrongLeader: false, Err: OK}
-
 			KVServerInfo("PutAppend RPC Return!", kv)
 			return
 
 		// KV Server and Raft in same process (goroutine) and crash at same time
 		case <-time.After(CheckIsLeaderTimeout):
 			if !kv.putAppendCheckIsLeader(reply, index) {
+				*reply = PutAppendReply{WrongLeader: true, Err: ErrWrongLeader}
 				return
 			}
 		case <-timer:
@@ -272,6 +279,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 				delete(kv.notifyCh, index)
 			}
 			kv.mu.Unlock()
+			*reply = PutAppendReply{WrongLeader: false, Err:ErrUnknown}
 			return
 		}
 
@@ -295,10 +303,11 @@ func (kv *KVServer) putAppendCheckIsLeader(reply *PutAppendReply, index int) boo
 // turn off debug output from this instance.
 //
 func (kv *KVServer) Kill() {
-	kv.rf.Kill()
 	// Your code here, if desired.
 	close(kv.killCh)
+
 	kv.mu.Lock()
+	kv.rf.Kill()
 	KVServerInfo("Killed!", kv)
 	defer kv.mu.Unlock()
 

@@ -6,9 +6,9 @@ import (
 )
 
 const (
-	ClerkRequestTimeout         time.Duration = time.Millisecond * 400
+	ClerkRequestTimeout         time.Duration = time.Millisecond * 2000
 	CheckIsLeaderTimeout        time.Duration = time.Millisecond * 10
-	KvServerWaitNotifyChTimeout time.Duration = time.Millisecond * 400
+	KvServerWaitNotifyChTimeout time.Duration = time.Millisecond * 2000
 	ClerkRequestSleep           time.Duration = time.Millisecond * 20
 )
 
@@ -71,7 +71,7 @@ const Debug = 0
 func KVServerInfo(format string, kv *KVServer, a ...interface{}) {
 	if Debug > 0 {
 		args := append([]interface{}{kv.me}, a...)
-		log.Printf("[INFO] Raft: [Id: %d] "+format, args...)
+		log.Printf("[INFO] RaftKV: [Id: %d] "+format, args...)
 	}
 	return
 }
@@ -79,7 +79,13 @@ func KVServerInfo(format string, kv *KVServer, a ...interface{}) {
 func KVServerDebug(format string, kv *KVServer, a ...interface{}) {
 	if Debug > 1 {
 		args := append([]interface{}{kv.me}, a...)
-		log.Printf("[INFO] Raft: [Id: %d] "+format, args...)
+		log.Printf("[Debug] RaftKV: [Id: %d] "+format, args...)
 	}
+	return
+}
+
+func KVServerForce(format string, kv *KVServer, a ...interface{}) {
+	args := append([]interface{}{kv.me}, a...)
+	log.Printf("[Force] RaftKV: [Id: %d] "+format, args...)
 	return
 }
