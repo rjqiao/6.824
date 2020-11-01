@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"fmt"
 	"log"
 	"time"
 )
@@ -16,9 +17,10 @@ const (
 
 const (
 	RaftRPCTimeout        = 50 * time.Millisecond
-	HeartbeatTimeout      = 120 * time.Millisecond
+	HeartbeatTimeout      = 100 * time.Millisecond
 	electionBaseTimeout   = 400 * time.Millisecond
 	electionRandomTimeout = 400 * time.Millisecond
+	applyTimeout          = 100 * time.Millisecond
 )
 
 type LeaderBroadcastCommand struct{}
@@ -35,22 +37,22 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 }
 
 func RaftForcePrint(format string, rf *Raft, a ...interface{}) {
-	args := append([]interface{}{rf.nanoSecCreated, rf.me, rf.currentTerm, rf.status}, a...)
-	log.Printf("[Force] Raft: [Created at: %v | Id: %d | Term: %d | %v] "+format, args...)
+	args := append([]interface{}{rf.me, rf.currentTerm, rf.status}, a...)
+	log.Printf("[Force] Raft: [Id: %d | Term: %d | %v] "+format, args...)
 	return
 }
 
 func RaftInfo(format string, rf *Raft, a ...interface{}) {
 	if Debug > 0 {
-		args := append([]interface{}{rf.nanoSecCreated, rf.me, rf.currentTerm, rf.status}, a...)
-		log.Printf("[INFO] Raft: [Created at: %v | Id: %d | Term: %d | %v] "+format, args...)
+		args := append([]interface{}{rf.me, rf.currentTerm, rf.status}, a...)
+		log.Printf("[INFO] Raft: [Id: %d | Term: %d | %v] "+format, args...)
 	}
 	return
 }
 
 func RaftDebug(format string, rf *Raft, a ...interface{}) {
 	if Debug > 1 {
-		args := append([]interface{}{rf.nanoSecCreated, rf.me, rf.currentTerm, rf.status}, a...)
+		args := append([]interface{}{rf.me, rf.currentTerm, rf.status}, a...)
 		log.Printf("[DEBUG] Raft: [Created at: %v | Id: %d | Term: %d | %v] "+format, args...)
 	}
 	return
@@ -103,4 +105,16 @@ func MinInt(x, y int) int {
 		return x
 	}
 	return y
+}
+
+func AssertF(b bool, format string, a ...interface{}) {
+	if !b {
+		panic(fmt.Sprintf(format, a...))
+	}
+}
+
+func PanicIfF(b bool, format string, a ...interface{}) {
+	if b {
+		panic(fmt.Sprintf(format, a...))
+	}
 }

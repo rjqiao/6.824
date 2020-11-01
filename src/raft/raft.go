@@ -82,6 +82,8 @@ type Raft struct {
 
 	killCh chan bool
 
+	ApplyCond *sync.Cond
+
 	// debug only
 	nanoSecCreated int64
 }
@@ -232,9 +234,7 @@ func (rf *Raft) transitionToFollower(newTerm int, votedFor int) {
 // lock outside
 // assert rf.status != Leader
 func (rf *Raft) promoteToLeader() {
-	if rf.status == Leader {
-		panic("Should not become leader when already leader")
-	}
+	PanicIfF(rf.status==Leader, "Should not become leader when already leader")
 
 	rf.status = Leader
 
@@ -259,8 +259,8 @@ func (rf *Raft) setCommitIndexAndApplyStateMachine(commitIndex int) {
 	if rf.commitIndex < commitIndex {
 		rf.commitIndex = commitIndex
 		RaftInfo("Commit to commitIndex: %d", rf, commitIndex)
+		rf.ApplyCond.Broadcast()
 	}
-	rf.applyLocalStateMachine()
 }
 
 func (rf *Raft) isUptoDate(cIndex int, cTerm int) bool {
@@ -316,32 +316,6 @@ func (rf *Raft) updateCommitIndex() {
 	}
 }
 
-// locked outside
-// send to rf.applyCh
-func (rf *Raft) applyLocalStateMachine() {
-	if rf.commitIndex > 0 && rf.commitIndex > rf.lastApplied {
-		entries := make([]LogEntry, rf.commitIndex-rf.lastApplied)
-		commitIndexInThisApply := rf.commitIndex
-		// assert len(entries) > 0
-		RaftDebug("Applying: len(rf.logs) = %d", rf, len(rf.logs))
-		copy(entries, rf.logs[rf.lastApplied:rf.commitIndex])
-		RaftInfo("Locally applying %d log entries. lastApplied: %d. commitIndex: %d",
-			rf, len(entries), rf.lastApplied, rf.commitIndex)
-
-		go func() {
-			for _, log := range entries {
-				select {
-				case <-rf.killCh:
-					return
-				case rf.applyCh <- ApplyMsg{CommandValid: true, CommandIndex: log.Index, Command: log.Command}:
-				}
-			}
-			rf.mu.Lock()
-			rf.lastApplied = MaxInt(rf.lastApplied, commitIndexInThisApply)
-			rf.mu.Unlock()
-		}()
-	}
-}
 
 // locked outside
 func (rf *Raft) updateLogAndCommitIndexWhenReceivingAppendEntriesSuccess(Entries []LogEntry, PrevLogIndex, LeaderCommit int) {
@@ -793,6 +767,54 @@ func (rf *Raft) doElection() {
 	}
 }
 
+func (rf *Raft) doApply() {
+	for {
+		rf.mu.Lock()
+		AssertF(rf.commitIndex >= rf.lastApplied,
+			"rf.commitIndex {%d} >= rf.lastApplied {%d} Failed!",
+			rf.commitIndex, rf.lastApplied)
+
+		//RaftForcePrint("rf.commitIndex {%d}, rf.lastApplied {%d}",
+		//	rf, rf.commitIndex, rf.lastApplied)
+
+		for rf.commitIndex==rf.lastApplied {
+			rf.ApplyCond.Wait()
+			select {
+			case <-rf.killCh:
+				rf.mu.Unlock()
+				return
+			default:
+			}
+		}
+
+		AssertF(rf.commitIndex>0, "commit index should > 0")
+		entries := make([]LogEntry, rf.commitIndex-rf.lastApplied)
+		commitIndexInThisApply := rf.commitIndex
+		// assert len(entries) > 0
+		AssertF(len(entries)>0, "len(entries)>0 fail")
+		RaftDebug("Applying: len(rf.logs) = %d", rf, len(rf.logs))
+		copy(entries, rf.logs[rf.lastApplied:rf.commitIndex])
+		//RaftForcePrint("Locally applying %d log entries. lastApplied: %d. commitIndex: %d",
+		//	rf, len(entries), rf.lastApplied, rf.commitIndex)
+
+		AssertF(rf.lastApplied+1 == entries[0].Index, "apply not in order!")
+		rf.lastApplied = MaxInt(rf.lastApplied, commitIndexInThisApply)
+
+		rf.mu.Unlock()
+
+		for _, log := range entries {
+			select {
+			case <-rf.killCh:
+				//close(rf.applyCh)
+				return
+			case rf.applyCh <- ApplyMsg{CommandValid: true, CommandIndex: log.Index, Command: log.Command}:
+			}
+		}
+
+		time.Sleep(applyTimeout)
+	}
+}
+
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -824,7 +846,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.logs = append(rf.logs, LogEntry{Index: index, Term: term, Command: command})
 	rf.sendAllAppendEntries() // broadcast new log to followers
 	rf.persist()
-	RaftInfo("New entry appended to leader's log: %v", rf, rf.logs[index-1])
+	//RaftForcePrint("New entry appended to leader's log: %v", rf, rf.logs[index-1])
 
 	return index, term, isLeader
 }
@@ -837,11 +859,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
+	close(rf.killCh)
+	//close(rf.applyCh)
+
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
 	RaftInfo("Killed!", rf)
-	close(rf.killCh)
 }
 
 //
@@ -872,6 +895,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.electionTimer = make(chan bool, 100)
 
 	rf.killCh = make(chan bool)
+	rf.ApplyCond = sync.NewCond(&rf.mu)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -882,6 +906,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.nanoSecCreated = time.Now().UnixNano()
 
 	go rf.electionDaemonProcess()
+	go rf.doApply()
 
 	return rf
 }
