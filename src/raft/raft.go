@@ -321,6 +321,17 @@ func (rf *Raft) updateCommitIndex() {
 func (rf *Raft) updateLogAndCommitIndexWhenReceivingAppendEntriesSuccess(Entries []LogEntry, PrevLogIndex, LeaderCommit int) {
 	commitIndexToUpdate := LeaderCommit
 	if len(Entries) != 0 {
+
+		// rf.commitIndex >= Entries[-1].Index could be true
+		// When the AppendEntries is delayed
+		//AssertF(rf.commitIndex <= Entries[len(Entries)-1].Index,
+		//	"rf.commitIndex=%d, Entries[len(Entries)-1].Index=%d",
+		//	rf.commitIndex,Entries[len(Entries)-1].Index)
+
+		if rf.commitIndex > Entries[len(Entries)-1].Index {
+			return
+		}
+
 		lastValidIndex := PrevLogIndex
 		for lastValidIndex+1 <= MinInt(Entries[len(Entries)-1].Index, rf.getLastIndex()) &&
 			rf.getTermForIndex(lastValidIndex+1) == Entries[lastValidIndex-PrevLogIndex].Term {

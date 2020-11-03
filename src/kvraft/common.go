@@ -6,9 +6,9 @@ import (
 )
 
 const (
-	ClerkRequestTimeout         time.Duration = time.Millisecond * 2000
+	ClerkRequestTimeout         time.Duration = time.Millisecond * 400
 	CheckIsLeaderTimeout        time.Duration = time.Millisecond * 10
-	KvServerWaitNotifyChTimeout time.Duration = time.Millisecond * 2000
+	KvServerWaitNotifyChTimeout time.Duration = time.Millisecond * 400
 	ClerkRequestSleep           time.Duration = time.Millisecond * 20
 )
 
