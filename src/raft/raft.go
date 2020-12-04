@@ -76,6 +76,9 @@ type Raft struct {
 	lastApplied int
 
 	// volatile state on leaders
+
+	// next start of Entries in AppendEntries
+	// what about snapshot?
 	nextIndex  []int
 	matchIndex []int
 
@@ -209,10 +212,10 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term               int
-	Success            bool
-	SuggestPreLogIndex int // next try for PrevLogIndex
-	SuggestPreLogTerm  int
+	Term                int
+	Success             bool
+	SuggestPrevLogIndex int // next try for PrevLogIndex
+	SuggestPrevLogTerm  int
 	//ConflictTerm int
 }
 
@@ -264,6 +267,11 @@ func (rf *Raft) PersistSnapshotAndDiscardLogs(lastIncludedSnapshotIndex int, sna
 		"rf.getOffsetFromIndex(lastIncludedSnapshotIndex) {%d} >= 0}",
 		rf.getOffsetFromIndex(lastIncludedSnapshotIndex))
 	AssertF(lastIncludedSnapshotIndex <= rf.commitIndex, "lastIncludedSnapshotIndex=%d, rf.commitIndex=%d", lastIncludedSnapshotIndex, rf.commitIndex)
+
+	// always see commitIndex >= lastIncludedSnapshotIndex
+	AssertF(rf.commitIndex >= lastIncludedSnapshotIndex,
+		"rf.commitIndex {%d} >= lastIncludedSnapshotIndex {%d}",
+		rf.commitIndex, lastIncludedSnapshotIndex)
 
 	rf.persistSnapshotAndDiscardLogsInner(lastIncludedSnapshotIndex, rf.logs[rf.getOffsetFromIndex(lastIncludedSnapshotIndex)].Term, snapShotBytes)
 }
@@ -342,6 +350,9 @@ func (rf *Raft) promoteToLeader() {
 // locked outside
 func (rf *Raft) setCommitIndexAndApplyStateMachine(commitIndex int) {
 	if rf.commitIndex < commitIndex {
+		AssertF(commitIndex >= rf.snapshotIndex,
+			"commitIndex {%d} >= rf.snapshotIndex {%d}",
+			commitIndex, rf.snapshotIndex)
 		rf.commitIndex = commitIndex
 		RaftInfo("Commit to commitIndex: %d", rf, commitIndex)
 		RaftForcePrint("Commit to commitIndex: %d", rf, commitIndex)
@@ -418,6 +429,7 @@ func (rf *Raft) updateCommitIndex() {
 func (rf *Raft) updateLogAndCommitIndexWhenReceivingAppendEntriesSuccess(Entries []LogEntry, PrevLogIndex, LeaderCommit int) {
 	//TODO: if PrevLogIndex<rf.commitIndex,
 	commitIndexToUpdate := LeaderCommit
+
 	if len(Entries) != 0 {
 
 		// rf.commitIndex >= Entries[-1].Index could be true
@@ -430,15 +442,16 @@ func (rf *Raft) updateLogAndCommitIndexWhenReceivingAppendEntriesSuccess(Entries
 			return
 		}
 
-		lastValidIndex := MaxInt(PrevLogIndex,rf.commitIndex)
+		lastValidIndex := MaxInt(PrevLogIndex, rf.commitIndex)
 		for lastValidIndex+1 <= MinInt(Entries[len(Entries)-1].Index, rf.getLastIndex()) &&
 			rf.getTermForIndex(lastValidIndex+1) == Entries[lastValidIndex-PrevLogIndex].Term {
 			lastValidIndex++
 		}
+		// TODO: when old AppendEntries comes, the logs will revert to old time, and commitIndex > lastIndex
 		rf.logs = append(rf.logs[:rf.getOffsetFromIndex(lastValidIndex)+1], Entries[lastValidIndex-PrevLogIndex:]...)
-		AssertF(commitIndexToUpdate<=Entries[len(Entries)-1].Index,
+		AssertF(commitIndexToUpdate <= Entries[len(Entries)-1].Index,
 			"commitIndexToUpdate=%d, Entries[len(Entries)-1].Index=%d",
-			commitIndexToUpdate,Entries[len(Entries)-1].Index)
+			commitIndexToUpdate, Entries[len(Entries)-1].Index)
 		commitIndexToUpdate = MinInt(commitIndexToUpdate, Entries[len(Entries)-1].Index)
 	}
 
@@ -454,26 +467,31 @@ func (rf *Raft) updateLogAndCommitIndexWhenReceivingAppendEntriesSuccess(Entries
 // no side effect
 func (rf *Raft) buildAppendEntriesReplyWhenNotSuccess(reply *AppendEntriesReply, PrevLogIndex int, PrevLogTerm int) {
 	if PrevLogIndex > rf.getLastIndex() {
-		//reply.ConflictTerm = -1
-		reply.SuggestPreLogIndex = rf.getLastIndex()
-		reply.SuggestPreLogTerm = rf.getLastTerm()
+		// this raft do not know about the PrevLogIndex
+		reply.SuggestPrevLogIndex = rf.getLastIndex()
+		reply.SuggestPrevLogTerm = rf.getLastTerm()
 	} else {
+		// there is conflict!
 		ConflictTerm := rf.getTermForIndex(PrevLogIndex)
 		PanicIfF(ConflictTerm == PrevLogTerm, "ConflictTerm==PrevLogTerm")
 
 		if ConflictTerm > PrevLogTerm {
 			// suggestTerm = the max index ( <= PrevLogTerm )
-			reply.SuggestPreLogIndex = PrevLogIndex
-			//TODO: 如果reply.SuggestPreLogIndex==rf.commitIndex那么一定可以从这里开始
-			for ; reply.SuggestPreLogIndex > rf.commitIndex && rf.getTermForIndex(reply.SuggestPreLogIndex) > PrevLogTerm; reply.SuggestPreLogIndex-- {
+			reply.SuggestPrevLogIndex = PrevLogIndex
+			//TODO: 如果reply.SuggestPrevLogIndex==rf.commitIndex那么一定可以从这里开始
+			for ; reply.SuggestPrevLogIndex > rf.commitIndex && rf.getTermForIndex(reply.SuggestPrevLogIndex) > PrevLogTerm; reply.SuggestPrevLogIndex-- {
 			}
-			reply.SuggestPreLogTerm = rf.getTermForIndex(reply.SuggestPreLogIndex) // term 0 if index 0
+			reply.SuggestPrevLogTerm = rf.getTermForIndex(reply.SuggestPrevLogIndex) // term 0 if index 0
 		} else {
 			//TODO: 找到最接近PrevLogTerm且 <=PrevLogTerm的index，和term
 
-			reply.SuggestPreLogIndex = PrevLogIndex - 1
-			reply.SuggestPreLogTerm = rf.getTermForIndex(reply.SuggestPreLogIndex) // term 0 if index 0
+			reply.SuggestPrevLogIndex = PrevLogIndex - 1
+			reply.SuggestPrevLogTerm = rf.getTermForIndex(reply.SuggestPrevLogIndex) // term 0 if index 0
 		}
+
+		AssertF(reply.SuggestPrevLogIndex >= rf.commitIndex,
+			"reply.SuggestPrevLogIndex {%d} >= rf.commitIndex {%d}",
+			reply.SuggestPrevLogIndex, rf.commitIndex)
 	}
 }
 
@@ -488,6 +506,10 @@ func (rf *Raft) buildAppendEntriesArgs(server int) *AppendEntriesArgs {
 	// assert nextIndex[server]>=1  因为index 0的entry不存在
 	// rf.getLastIndex >= 0
 	if rf.nextIndex[server] > rf.getLastIndex() {
+		AssertF(rf.nextIndex[server] == rf.getLastIndex()+1,
+			"rf.nextIndex[server] {%v} == rf.getLastIndex()+1 {%v}",
+			rf.nextIndex[server], rf.getLastIndex()+1)
+		// Heartbeat
 		entries = make([]LogEntry, 0)
 		prevLogIndex = rf.getLastIndex()
 		prevLogTerm = rf.getLastTerm()
@@ -499,7 +521,7 @@ func (rf *Raft) buildAppendEntriesArgs(server int) *AppendEntriesArgs {
 
 		PanicIfF(rf.nextIndex[server] <= rf.snapshotTerm, "rf.nextIndex[server]<1, %d<1", rf.nextIndex[server] < 1)
 		prevLogIndex = rf.nextIndex[server] - 1
-		prevLogTerm = rf.getTermForIndex(rf.nextIndex[server] - 1)
+		prevLogTerm = rf.getTermForIndex(prevLogIndex)
 	}
 
 	return &AppendEntriesArgs{
@@ -516,21 +538,26 @@ func (rf *Raft) buildAppendEntriesArgs(server int) *AppendEntriesArgs {
 // side effect
 func (rf *Raft) updateNextIndexWhenAppendEntriesFail(server int, reply *AppendEntriesReply) {
 	//lastTryIndex := rf.nextIndex[server]
-	if reply.SuggestPreLogIndex <= rf.snapshotIndex {
+	if reply.SuggestPrevLogIndex < rf.snapshotIndex {
+		// suggestPrevLogIndex+1 is the one that should be the first entry in AppendEntries
+		// If suggestPrevLogIndex+1 <= rf.snapshotIndex, then we cannot find the entry
+
+		// the next time will send snapshotIndex
+		// including index==0 && term==0 when rf.snapshotIndex>0 ?
 		rf.nextIndex[server] = rf.snapshotIndex
-	} else if rf.getTermForIndex(reply.SuggestPreLogIndex) == reply.SuggestPreLogTerm {
-		// including index==0 && term==0
-		rf.nextIndex[server] = reply.SuggestPreLogIndex + 1
-	} else if rf.getTermForIndex(reply.SuggestPreLogIndex) > reply.SuggestPreLogTerm {
-		npi := reply.SuggestPreLogIndex
-		for ; npi >= rf.snapshotIndex+1 && rf.getTermForIndex(npi) > reply.SuggestPreLogTerm; npi-- {
+	} else if rf.getTermForIndex(reply.SuggestPrevLogIndex) == reply.SuggestPrevLogTerm {
+		// including index==0 && term==0 when rf.snapshotIndex==0 ?
+		rf.nextIndex[server] = reply.SuggestPrevLogIndex + 1
+	} else if rf.getTermForIndex(reply.SuggestPrevLogIndex) > reply.SuggestPrevLogTerm {
+		npi := reply.SuggestPrevLogIndex
+		for ; npi >= rf.snapshotIndex+1 && rf.getTermForIndex(npi) > reply.SuggestPrevLogTerm; npi-- {
 		}
-		// side effect
 		rf.nextIndex[server] = npi + 1
 	} else {
-		// assert reply.SuggestPreLogIndex >= rf.snapshotIndex+1
-		// side effect
-		rf.nextIndex[server] = reply.SuggestPreLogIndex
+		AssertF(reply.SuggestPrevLogIndex >= rf.snapshotIndex+1,
+			"reply.SuggestPrevLogIndex {%d} >= rf.snapshotIndex+1 {%d}",
+			reply.SuggestPrevLogIndex, rf.snapshotIndex+1)
+		rf.nextIndex[server] = reply.SuggestPrevLogIndex
 	}
 
 	// assert 1 <= rf.nextIndex[server] <= rf.getLastIndex() + 1
@@ -705,10 +732,53 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Term = rf.currentTerm
 
+	// TODO: how to get rid of old RPC calls? Could old RPC calls have bad effect on raft state?
+
+	// Some assertions I thought of does not always true.. Because AppendEntries RPC may be delayed
+	if args.PrevLogIndex+1 <= rf.commitIndex &&
+		len(args.Entries) > 0 && args.Entries[len(args.Entries)-1].Index >= rf.commitIndex {
+		entry := args.Entries[rf.commitIndex-args.PrevLogIndex-1]
+		AssertF(entry.Index == rf.commitIndex,
+			"entry.Index {} == rf.commitIndex {}",
+			entry.Index, rf.commitIndex)
+		AssertF(entry.Term == rf.getTermForIndex(rf.commitIndex),
+			"entry.Index {} == rf.commitIndex {}",
+			entry.Index, rf.commitIndex)
+	}
+
+	//if args.PrevLogIndex <= rf.commitIndex {
+	//	// We should see this AppendEntries always succeed
+	//
+	//	if args.PrevLogIndex+1 <= rf.commitIndex {
+	//		AssertF(len(args.Entries) > 0,
+	//			"len(args.Entries) {%d}", args.Entries)
+	//
+	//		// the last log entry must be greater-equal than commitIndex
+	//		//AssertF(args.Entries[len(args.Entries)-1].Index >= rf.commitIndex,
+	//		//	"args.Entries[len(args.Entries)-1].Index {%v} >= rf.commitIndex {%v}",
+	//		//	args.Entries[len(args.Entries)-1].Index, rf.commitIndex)
+	//		//RaftForcePrint("prevLogIndex %d, commitIndex %d, Entries %v",rf, args.PrevLogIndex, rf.commitIndex, args.Entries)
+	//		entry := args.Entries[rf.commitIndex-args.PrevLogIndex-1]
+	//		AssertF(entry.Index == rf.commitIndex,
+	//			"entry.Index {} == rf.commitIndex {}",
+	//			entry.Index, rf.commitIndex)
+	//		AssertF(entry.Term == rf.getTermForIndex(rf.commitIndex),
+	//			"entry.Index {} == rf.commitIndex {}",
+	//			entry.Index, rf.commitIndex)
+	//	} else {
+	//		// entry is empty when args.PrevLogIndex == rf.commitIndex and no new log
+	//		AssertF(args.PrevLogIndex == rf.commitIndex,
+	//			"args.PrevLogIndex {} == rf.commitIndex {}",
+	//			args.PrevLogIndex, rf.commitIndex)
+	//	}
+	//}
+
 	// check PrevLogIndex and PrevLogTerm
-	if (args.PrevLogIndex == 0) ||
-		(args.PrevLogIndex <= rf.getLastIndex() &&
-			(args.PrevLogIndex <= rf.commitIndex || args.PrevLogTerm == rf.getTermForIndex(args.PrevLogIndex))) {
+	// Make sure that this server know about PrevLogIndex,
+	// (PrevLogIndex, PrevLogTerm) pair matches this raft
+	// (PrevLogIndex, PrevLogTerm) == (0,0) is included
+	if args.PrevLogIndex <= rf.getLastIndex() &&
+		(args.PrevLogIndex <= rf.commitIndex || args.PrevLogTerm == rf.getTermForIndex(args.PrevLogIndex)) {
 		// no conflict
 		reply.Success = true
 		rf.updateLogAndCommitIndexWhenReceivingAppendEntriesSuccess(args.Entries, args.PrevLogIndex, args.LeaderCommit)
@@ -853,6 +923,7 @@ func (rf *Raft) sendAllAppendEntriesOrInstallSnapshot() {
 			if rf.snapshotIndex < rf.nextIndex[i] {
 				go rf.sendAndCollectAppendEntries(i)
 			} else {
+				// should not work as heartbeat??
 				go rf.sendAndCollectInstallSnapshot(i)
 			}
 		}
