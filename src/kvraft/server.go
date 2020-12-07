@@ -101,7 +101,7 @@ func (kv *KVServer) handleApplyMsg() {
 			if !msg.CommandValid {
 				kv.mu.Lock()
 				// got a snapshot
-				raft.PanicIfF(msg.Snapshot == nil, "msg.Snapshot==nil")
+				raft.PanicIfF(len(msg.Snapshot)==0, "")
 				kv.applySnapshot(msg.Snapshot)
 				kv.mu.Unlock()
 				continue

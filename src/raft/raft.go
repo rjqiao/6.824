@@ -216,7 +216,6 @@ type AppendEntriesReply struct {
 	Success             bool
 	SuggestPrevLogIndex int // next try for PrevLogIndex
 	SuggestPrevLogTerm  int
-	//ConflictTerm int
 }
 
 //
@@ -254,7 +253,6 @@ type InstallSnapshotReply struct {
 }
 
 // will update -- logs, commitIndex, snapshotIndex, snapshotTerm,
-// assert snapshotIndex<=commitIndex
 func (rf *Raft) PersistSnapshotAndDiscardLogs(lastIncludedSnapshotIndex int, snapShotBytes []byte) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -263,9 +261,11 @@ func (rf *Raft) PersistSnapshotAndDiscardLogs(lastIncludedSnapshotIndex int, sna
 	AssertF(rf.getOffsetFromIndex(lastIncludedSnapshotIndex) < len(rf.logs),
 		"rf.getOffsetFromIndex(lastIncludedSnapshotIndex) {%d} < len(rf.logs) {%d}",
 		rf.getOffsetFromIndex(lastIncludedSnapshotIndex), len(rf.logs))
-	AssertF(rf.getOffsetFromIndex(lastIncludedSnapshotIndex) >= 0,
-		"rf.getOffsetFromIndex(lastIncludedSnapshotIndex) {%d} >= 0}",
-		rf.getOffsetFromIndex(lastIncludedSnapshotIndex))
+
+	// Does not work when receiving InstallSnapshot just now
+	//AssertF(rf.getOffsetFromIndex(lastIncludedSnapshotIndex) >= 0,
+	//	"rf.getOffsetFromIndex(lastIncludedSnapshotIndex) {%d} >= 0}",
+	//	rf.getOffsetFromIndex(lastIncludedSnapshotIndex))
 	AssertF(lastIncludedSnapshotIndex <= rf.commitIndex, "lastIncludedSnapshotIndex=%d, rf.commitIndex=%d", lastIncludedSnapshotIndex, rf.commitIndex)
 
 	// always see commitIndex >= lastIncludedSnapshotIndex
@@ -273,7 +273,8 @@ func (rf *Raft) PersistSnapshotAndDiscardLogs(lastIncludedSnapshotIndex int, sna
 		"rf.commitIndex {%d} >= lastIncludedSnapshotIndex {%d}",
 		rf.commitIndex, lastIncludedSnapshotIndex)
 
-	rf.persistSnapshotAndDiscardLogsInner(lastIncludedSnapshotIndex, rf.logs[rf.getOffsetFromIndex(lastIncludedSnapshotIndex)].Term, snapShotBytes)
+	rf.persistSnapshotAndDiscardLogsInner(lastIncludedSnapshotIndex, rf.getTermForIndex(lastIncludedSnapshotIndex), snapShotBytes)
+
 }
 
 // Locked outside
@@ -496,45 +497,6 @@ func (rf *Raft) buildAppendEntriesReplyWhenNotSuccess(reply *AppendEntriesReply,
 }
 
 // lock outside
-// no side effect
-func (rf *Raft) buildAppendEntriesArgs(server int) *AppendEntriesArgs {
-	prevLogIndex := 0
-	prevLogTerm := 0
-	var entries []LogEntry
-	leaderCommit := rf.commitIndex
-
-	// assert nextIndex[server]>=1  因为index 0的entry不存在
-	// rf.getLastIndex >= 0
-	if rf.nextIndex[server] > rf.getLastIndex() {
-		AssertF(rf.nextIndex[server] == rf.getLastIndex()+1,
-			"rf.nextIndex[server] {%v} == rf.getLastIndex()+1 {%v}",
-			rf.nextIndex[server], rf.getLastIndex()+1)
-		// Heartbeat
-		entries = make([]LogEntry, 0)
-		prevLogIndex = rf.getLastIndex()
-		prevLogTerm = rf.getLastTerm()
-	} else {
-		offset := rf.getOffsetFromIndex(rf.nextIndex[server])
-		entriesToCopy := rf.logs[offset:]
-		entries = make([]LogEntry, len(entriesToCopy))
-		copy(entries, entriesToCopy)
-
-		PanicIfF(rf.nextIndex[server] <= rf.snapshotTerm, "rf.nextIndex[server]<1, %d<1", rf.nextIndex[server] < 1)
-		prevLogIndex = rf.nextIndex[server] - 1
-		prevLogTerm = rf.getTermForIndex(prevLogIndex)
-	}
-
-	return &AppendEntriesArgs{
-		Term:         rf.currentTerm,
-		LeaderId:     rf.me,
-		PrevLogIndex: prevLogIndex,
-		PrevLogTerm:  prevLogTerm,
-		Entries:      entries,
-		LeaderCommit: leaderCommit,
-	}
-}
-
-// lock outside
 // side effect
 func (rf *Raft) updateNextIndexWhenAppendEntriesFail(server int, reply *AppendEntriesReply) {
 	//lastTryIndex := rf.nextIndex[server]
@@ -718,13 +680,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	if rf.status == Leader && args.Term == rf.currentTerm {
-		panic("Should not happen! rf.status == Leader && args.Term == rf.currentTerm")
-	}
+	AssertF(rf.status != Leader || args.Term != rf.currentTerm,
+		"Should not happen! rf.status == Leader && args.Term == rf.currentTerm")
 
 	goodHeartBeat = true
 
-	if args.Term > rf.currentTerm {
+	// correct follower state following
+
+	if args.Term > rf.currentTerm || rf.votedFor != args.LeaderId {
 		rf.transitionToFollower(args.Term, args.LeaderId)
 	}
 
@@ -733,17 +696,34 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Term = rf.currentTerm
 
 	// TODO: how to get rid of old RPC calls? Could old RPC calls have bad effect on raft state?
+	if args.PrevLogIndex < rf.commitIndex && (len(args.Entries) == 0 ||
+		args.Entries[len(args.Entries)-1].Index < rf.commitIndex) {
+		// very old RPC call
+		// do not update anything
+		reply.Success = true
+		return
+	}
 
-	// Some assertions I thought of does not always true.. Because AppendEntries RPC may be delayed
+	if args.PrevLogIndex <= rf.commitIndex && args.PrevLogIndex >= rf.snapshotIndex {
+		AssertF(args.PrevLogTerm == rf.getTermForIndex(args.PrevLogIndex),
+			"args.PrevLogTerm {%d} == rf.getTermForIndex(args.PrevLogIndex) {%d}",
+			args.PrevLogTerm, rf.getTermForIndex(args.PrevLogIndex))
+	}
+
 	if args.PrevLogIndex+1 <= rf.commitIndex &&
 		len(args.Entries) > 0 && args.Entries[len(args.Entries)-1].Index >= rf.commitIndex {
+
+		AssertF(args.PrevLogIndex+1 == args.Entries[0].Index,
+			"args.PrevLogIndex+1 {%d} == args.Entries[0].Index {%d}",
+			args.PrevLogIndex+1, args.Entries[0].Index)
+
 		entry := args.Entries[rf.commitIndex-args.PrevLogIndex-1]
 		AssertF(entry.Index == rf.commitIndex,
-			"entry.Index {} == rf.commitIndex {}",
+			"entry.Index {%d} == rf.commitIndex {%d}",
 			entry.Index, rf.commitIndex)
 		AssertF(entry.Term == rf.getTermForIndex(rf.commitIndex),
-			"entry.Index {} == rf.commitIndex {}",
-			entry.Index, rf.commitIndex)
+			"entry.Index {%d} == rf.commitIndex {%d}",
+			entry.Term, rf.getTermForIndex(rf.commitIndex))
 	}
 
 	//if args.PrevLogIndex <= rf.commitIndex {
@@ -787,6 +767,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		rf.buildAppendEntriesReplyWhenNotSuccess(reply, args.PrevLogIndex, args.PrevLogTerm)
 	}
+
+	if len(rf.logs) != 0 {
+		AssertF(rf.logs[len(rf.logs)-1].Index >= rf.commitIndex,
+			"rf.logs[len(rf.logs)-1].Index {%d} >= rf.commitIndex {%d}",
+			rf.logs[len(rf.logs)-1].Index, rf.commitIndex)
+	}
+
 	rf.persist()
 }
 
@@ -796,14 +783,45 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	return ok
 }
 
-func (rf *Raft) beforeSendAppendEntries(server int) (*AppendEntriesArgs, bool) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+func (rf *Raft) beforeSendAppendEntries(server int) *AppendEntriesArgs {
+	AssertF(rf.status == Leader, "")
 
-	if rf.status != Leader {
-		return nil, false
+	prevLogIndex := 0
+	prevLogTerm := 0
+	var entries []LogEntry
+	leaderCommit := rf.commitIndex
+
+	AssertF(rf.nextIndex[server] >= 1,
+		"rf.nextIndex[server] {%d} >= 1", rf.nextIndex[server])
+	// 因为index 0的entry不存在
+	// rf.getLastIndex >= 0
+	if rf.nextIndex[server] > rf.getLastIndex() {
+		AssertF(rf.nextIndex[server] == rf.getLastIndex()+1,
+			"rf.nextIndex[server] {%v} == rf.getLastIndex()+1 {%v}",
+			rf.nextIndex[server], rf.getLastIndex()+1)
+		// Heartbeat
+		entries = make([]LogEntry, 0)
+		prevLogIndex = rf.getLastIndex()
+		prevLogTerm = rf.getLastTerm()
+	} else {
+		offset := rf.getOffsetFromIndex(rf.nextIndex[server])
+		entriesToCopy := rf.logs[offset:]
+		entries = make([]LogEntry, len(entriesToCopy))
+		copy(entries, entriesToCopy)
+
+		PanicIfF(rf.nextIndex[server] <= rf.snapshotTerm, "rf.nextIndex[server]<1, %d<1", rf.nextIndex[server] < 1)
+		prevLogIndex = rf.nextIndex[server] - 1
+		prevLogTerm = rf.getTermForIndex(prevLogIndex)
 	}
-	return rf.buildAppendEntriesArgs(server), true
+
+	return &AppendEntriesArgs{
+		Term:         rf.currentTerm,
+		LeaderId:     rf.me,
+		PrevLogIndex: prevLogIndex,
+		PrevLogTerm:  prevLogTerm,
+		Entries:      entries,
+		LeaderCommit: leaderCommit,
+	}
 }
 
 func (rf *Raft) resetElectionTimerIf(b bool) {
@@ -855,19 +873,19 @@ func (rf *Raft) afterSendAppendEntries(server int, args *AppendEntriesArgs, repl
 	return true
 }
 
-func (rf *Raft) sendAndCollectAppendEntries(server int) bool {
-	args, ok := rf.beforeSendAppendEntries(server)
-	if !ok {
-		return ok
+func (rf *Raft) sendAndCollectAppendEntries(server int) {
+	args := rf.beforeSendAppendEntries(server)
+	if args == nil {
+		return
 	}
 
-	reply := &AppendEntriesReply{}
-	ok = rf.sendAppendEntries(server, args, reply)
-	if !ok {
-		return ok
-	}
-
-	return rf.afterSendAppendEntries(server, args, reply)
+	go func() {
+		reply := &AppendEntriesReply{}
+		ok := rf.sendAppendEntries(server, args, reply)
+		if !ok {
+		}
+		rf.afterSendAppendEntries(server, args, reply)
+	}()
 }
 
 func (rf *Raft) afterSendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
@@ -892,8 +910,8 @@ func (rf *Raft) afterSendInstallSnapshot(server int, args *InstallSnapshotArgs, 
 	return true
 }
 
-func (rf *Raft) sendAndCollectInstallSnapshot(server int) bool {
-	rf.mu.Lock()
+func (rf *Raft) sendAndCollectInstallSnapshot(server int) {
+	AssertF(rf.status == Leader, "")
 	args := &InstallSnapshotArgs{
 		Term:              rf.currentTerm,
 		LeaderId:          rf.me,
@@ -901,15 +919,15 @@ func (rf *Raft) sendAndCollectInstallSnapshot(server int) bool {
 		LastIncludedTerm:  rf.snapshotTerm,
 		Data:              rf.Persister.ReadSnapshot(),
 	}
-	rf.mu.Unlock()
 
-	reply := &InstallSnapshotReply{}
-	ok := rf.sendInstallSnapShot(server, args, reply)
-	if !ok {
-		return ok
-	}
-
-	return rf.afterSendInstallSnapshot(server, args, reply)
+	go func() {
+		reply := &InstallSnapshotReply{}
+		ok := rf.sendInstallSnapShot(server, args, reply)
+		if !ok {
+			return
+		}
+		rf.afterSendInstallSnapshot(server, args, reply)
+	}()
 }
 
 // No lock inside, should add lock outside
@@ -921,10 +939,10 @@ func (rf *Raft) sendAllAppendEntriesOrInstallSnapshot() {
 	for i := range rf.peers {
 		if i != rf.me {
 			if rf.snapshotIndex < rf.nextIndex[i] {
-				go rf.sendAndCollectAppendEntries(i)
+				rf.sendAndCollectAppendEntries(i)
 			} else {
 				// should not work as heartbeat??
-				go rf.sendAndCollectInstallSnapshot(i)
+				rf.sendAndCollectInstallSnapshot(i)
 			}
 		}
 	}
@@ -1087,6 +1105,7 @@ func (rf *Raft) doApply() {
 				Snapshot:     rf.Persister.ReadSnapshot(),
 			}:
 			}
+			// do not wait, since snapshot might not be the latest
 		} else {
 			// rf.snapshotIndex <= rf.lastApplied < rf.commitIndex
 			entries := make([]LogEntry, rf.commitIndex-rf.lastApplied)
@@ -1114,9 +1133,8 @@ func (rf *Raft) doApply() {
 					Snapshot:     nil}:
 				}
 			}
+			time.Sleep(applyTimeout)
 		}
-
-		time.Sleep(applyTimeout)
 	}
 }
 
