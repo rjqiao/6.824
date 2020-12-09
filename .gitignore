@@ -6,3 +6,4 @@ api.key
 /dev_logs/
 /src/playground/
 /bin/
+.vscode/

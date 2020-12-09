@@ -56,13 +56,10 @@ func (kv *KVServer) needSnapShot() bool {
 
 // should hold lock outside
 func (kv *KVServer) generateSnapshotAndApplyToRaft() {
-
 	snapShotPersistence := SnapShotPersistence{
 		Data:                  kv.data,
 		LatestAppliedLogIndex: kv.latestAppliedLogIndex,
 		LatestRequests:        kv.latestRequests,
-
-		//SnapShotIndex:         index,
 	}
 	buf := new(bytes.Buffer)
 	_ = gob.NewEncoder(buf).Encode(snapShotPersistence)
@@ -147,8 +144,8 @@ func (kv *KVServer) handleApplyMsg() {
 
 			// check and generate snapshot (after new applied)
 			if kv.needSnapShot() {
-				// TODO: really need the commandIndex?
-				// No, we do not
+				// might not be able to take snapshot (latestAppliedLogIndex <= snapshotIndex can happen)
+				// because KV state is not always consistent with Raft state
 				kv.generateSnapshotAndApplyToRaft()
 			}
 

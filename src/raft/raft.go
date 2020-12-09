@@ -257,11 +257,12 @@ func (rf *Raft) PersistSnapshotAndDiscardLogs(lastIncludedSnapshotIndex int, sna
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	RaftForcePrint("lastIncludedSnapshotIndex = %d, rf.snapshotIndex = %d", rf, lastIncludedSnapshotIndex, rf.snapshotIndex)
-	AssertF(rf.getOffsetFromIndex(lastIncludedSnapshotIndex) < len(rf.logs),
-		"rf.getOffsetFromIndex(lastIncludedSnapshotIndex) {%d} < len(rf.logs) {%d}",
-		rf.getOffsetFromIndex(lastIncludedSnapshotIndex), len(rf.logs))
+	if lastIncludedSnapshotIndex <= rf.snapshotIndex {
+		RaftForcePrint("appliedIndex {%d} fall behind snapshotIndex {%d}", rf, lastIncludedSnapshotIndex, rf.snapshotIndex)
+		return
+	}
 
+	RaftForcePrint("lastIncludedSnapshotIndex = %d, rf.snapshotIndex = %d", rf, lastIncludedSnapshotIndex, rf.snapshotIndex)
 	// Does not work when receiving InstallSnapshot just now
 	//AssertF(rf.getOffsetFromIndex(lastIncludedSnapshotIndex) >= 0,
 	//	"rf.getOffsetFromIndex(lastIncludedSnapshotIndex) {%d} >= 0}",
@@ -274,11 +275,11 @@ func (rf *Raft) PersistSnapshotAndDiscardLogs(lastIncludedSnapshotIndex int, sna
 		rf.commitIndex, lastIncludedSnapshotIndex)
 
 	rf.persistSnapshotAndDiscardLogsInner(lastIncludedSnapshotIndex, rf.getTermForIndex(lastIncludedSnapshotIndex), snapShotBytes)
-
 }
 
 // Locked outside
 func (rf *Raft) persistSnapshotAndDiscardLogsInner(lastIncludedSnapshotIndex int, lastIncludedSnapshotTerm int, snapShotBytes []byte) {
+
 	// 1. When raft receive InstallSnapshot, it should discard all logs
 	// 2. When raft receive PersistSnapshot from kvraft, it should not discard new logs after $lastIncludedSnapshotIndex
 	// --->
@@ -350,6 +351,7 @@ func (rf *Raft) promoteToLeader() {
 
 // locked outside
 func (rf *Raft) setCommitIndexAndApplyStateMachine(commitIndex int) {
+	// commitIndex monotonically increases
 	if rf.commitIndex < commitIndex {
 		AssertF(commitIndex >= rf.snapshotIndex,
 			"commitIndex {%d} >= rf.snapshotIndex {%d}",
@@ -370,6 +372,8 @@ func (rf *Raft) isUptoDate(cIndex int, cTerm int) bool {
 }
 
 func (rf *Raft) getOffsetFromIndex(index int) int {
+	AssertF(index >= rf.snapshotIndex,
+		"index {%d} >= rf.snapshotIndex {%d}", index, rf.snapshotIndex)
 	return index - rf.snapshotIndex - 1
 }
 
@@ -428,40 +432,37 @@ func (rf *Raft) updateCommitIndex() {
 
 // locked outside
 func (rf *Raft) updateLogAndCommitIndexWhenReceivingAppendEntriesSuccess(Entries []LogEntry, PrevLogIndex, LeaderCommit int) {
-	//TODO: if PrevLogIndex<rf.commitIndex,
-	commitIndexToUpdate := LeaderCommit
-
 	if len(Entries) != 0 {
-
-		// rf.commitIndex >= Entries[-1].Index could be true
-		// When the AppendEntries is delayed
-		//AssertF(rf.commitIndex <= Entries[len(Entries)-1].Index,
-		//	"rf.commitIndex=%d, Entries[len(Entries)-1].Index=%d",
-		//	rf.commitIndex,Entries[len(Entries)-1].Index)
-
-		if rf.commitIndex > Entries[len(Entries)-1].Index {
-			return
+		getOffsetInEntries := func(i int) int {
+			return i - PrevLogIndex - 1
 		}
 
-		lastValidIndex := MaxInt(PrevLogIndex, rf.commitIndex)
-		for lastValidIndex+1 <= MinInt(Entries[len(Entries)-1].Index, rf.getLastIndex()) &&
-			rf.getTermForIndex(lastValidIndex+1) == Entries[lastValidIndex-PrevLogIndex].Term {
-			lastValidIndex++
+		index := MaxInt(PrevLogIndex+1, rf.snapshotIndex+1)
+		AssertF(getOffsetInEntries(index) >= 0, "getOffsetInEntries(index) {%d}", getOffsetInEntries(index))
+		for ; index <= rf.commitIndex && getOffsetInEntries(index) < len(Entries); index++ {
+			AssertF(Entries[getOffsetInEntries(index)].Index == index, "")
+			AssertF(rf.getTermForIndex(index) == Entries[getOffsetInEntries(index)].Term, "")
 		}
-		// TODO: when old AppendEntries comes, the logs will revert to old time, and commitIndex > lastIndex
-		rf.logs = append(rf.logs[:rf.getOffsetFromIndex(lastValidIndex)+1], Entries[lastValidIndex-PrevLogIndex:]...)
-		AssertF(commitIndexToUpdate <= Entries[len(Entries)-1].Index,
-			"commitIndexToUpdate=%d, Entries[len(Entries)-1].Index=%d",
-			commitIndexToUpdate, Entries[len(Entries)-1].Index)
-		commitIndexToUpdate = MinInt(commitIndexToUpdate, Entries[len(Entries)-1].Index)
+
+		for ; index <= rf.getLastIndex() && getOffsetInEntries(index) < len(Entries) && rf.getTermForIndex(index) == Entries[getOffsetInEntries(index)].Term; index++ {
+			AssertF(Entries[getOffsetInEntries(index)].Index == index, "")
+		}
+
+		if getOffsetInEntries(index) < len(Entries) {
+			// conflict
+			// or Entries has longer logs
+			AssertF(index <= rf.getLastIndex()+1, "")
+			AssertF(index <= rf.snapshotIndex+1 || rf.logs[rf.getOffsetFromIndex(index-1)].Index == index-1, "")
+			AssertF(Entries[getOffsetInEntries(index)].Index == index, "")
+			rf.logs = append(rf.logs[:rf.getOffsetFromIndex(index)], Entries[getOffsetInEntries(index):]...)
+		} else {
+			// rf.logs longer (or equal), no conflict
+		}
+
+		rf.setCommitIndexAndApplyStateMachine(MinInt(LeaderCommit, Entries[len(Entries)-1].Index))
+	} else {
+		rf.setCommitIndexAndApplyStateMachine(LeaderCommit)
 	}
-
-	// update commitIndex
-	// assert args.LeaderCommit <= rf.getLastEntryIndex()
-	// assert LeaderCommit >= rf.commitIndex
-
-	// leader could has very small commitIndex
-	rf.setCommitIndexAndApplyStateMachine(MaxInt(commitIndexToUpdate, rf.commitIndex))
 }
 
 // lock outside
@@ -538,8 +539,12 @@ func (rf *Raft) updateIndexesAndApplyWhenSuccess(server int, args *AppendEntries
 		return
 	}
 
+	AssertF(args.Entries[len(args.Entries)-1].Index == args.PrevLogIndex+len(args.Entries),
+		"args.Entries[len(args.Entries)-1].Index {%d} == args.PrevLogIndex {%d} + len(args.Entries) {%d}",
+		args.Entries[len(args.Entries)-1].Index, args.PrevLogIndex, len(args.Entries))
+
 	// Only use $args but not current rf!!!!
-	lastIndexNewlyAppendToServer := args.Entries[len(args.Entries)-1].Index
+	lastIndexNewlyAppendToServer := args.PrevLogIndex + len(args.Entries)
 
 	rf.nextIndex[server] = lastIndexNewlyAppendToServer + 1
 	rf.matchIndex[server] = MaxInt(rf.matchIndex[server], lastIndexNewlyAppendToServer)
@@ -648,18 +653,19 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		reply.Term = rf.currentTerm
 		return
 	}
-	PanicIfF(rf.status == Leader && args.Term == rf.currentTerm, "InstallSnapshot, Should not happen! rf.status == Leader && args.Term == rf.currentTerm")
 
-	reply.Term = args.Term
+	AssertF(rf.status != Leader || rf.currentTerm < args.Term, "")
+
 	goodHeartBeat = true
-	if args.Term > rf.currentTerm {
+
+	if args.Term > rf.currentTerm || rf.votedFor != args.LeaderId {
 		rf.transitionToFollower(args.Term, args.LeaderId)
 	}
+	reply.Term = rf.currentTerm
 
 	RaftDebug("InstallSnapshot:", rf)
 
 	if rf.commitIndex < args.LastIncludedIndex {
-
 	}
 
 	rf.persistSnapshotAndDiscardLogsInner(args.LastIncludedIndex, args.LastIncludedTerm, args.Data)
@@ -673,23 +679,24 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.resetElectionTimerIf(goodHeartBeat)
 	}()
 
+	// args.Term --- rf.currentTerm
+
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
-		// no need -- reply.NextTryIndex
 		return
 	}
 
-	AssertF(rf.status != Leader || args.Term != rf.currentTerm,
-		"Should not happen! rf.status == Leader && args.Term == rf.currentTerm")
+	AssertF(rf.status != Leader || args.Term > rf.currentTerm, "")
 
 	goodHeartBeat = true
 
 	// correct follower state following
-
 	if args.Term > rf.currentTerm || rf.votedFor != args.LeaderId {
 		rf.transitionToFollower(args.Term, args.LeaderId)
 	}
+
+	AssertF(rf.status == Follower && rf.currentTerm == args.Term, "")
 
 	RaftDebug("AppendEntries: args.LeaderCommit = %d", rf, args.LeaderCommit)
 
@@ -722,36 +729,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			"entry.Index {%d} == rf.commitIndex {%d}",
 			entry.Index, rf.commitIndex)
 		AssertF(entry.Term == rf.getTermForIndex(rf.commitIndex),
-			"entry.Index {%d} == rf.commitIndex {%d}",
+			"entry.Term {%d} == rf.getTermForIndex(rf.commitIndex) {%d}",
 			entry.Term, rf.getTermForIndex(rf.commitIndex))
 	}
-
-	//if args.PrevLogIndex <= rf.commitIndex {
-	//	// We should see this AppendEntries always succeed
-	//
-	//	if args.PrevLogIndex+1 <= rf.commitIndex {
-	//		AssertF(len(args.Entries) > 0,
-	//			"len(args.Entries) {%d}", args.Entries)
-	//
-	//		// the last log entry must be greater-equal than commitIndex
-	//		//AssertF(args.Entries[len(args.Entries)-1].Index >= rf.commitIndex,
-	//		//	"args.Entries[len(args.Entries)-1].Index {%v} >= rf.commitIndex {%v}",
-	//		//	args.Entries[len(args.Entries)-1].Index, rf.commitIndex)
-	//		//RaftForcePrint("prevLogIndex %d, commitIndex %d, Entries %v",rf, args.PrevLogIndex, rf.commitIndex, args.Entries)
-	//		entry := args.Entries[rf.commitIndex-args.PrevLogIndex-1]
-	//		AssertF(entry.Index == rf.commitIndex,
-	//			"entry.Index {} == rf.commitIndex {}",
-	//			entry.Index, rf.commitIndex)
-	//		AssertF(entry.Term == rf.getTermForIndex(rf.commitIndex),
-	//			"entry.Index {} == rf.commitIndex {}",
-	//			entry.Index, rf.commitIndex)
-	//	} else {
-	//		// entry is empty when args.PrevLogIndex == rf.commitIndex and no new log
-	//		AssertF(args.PrevLogIndex == rf.commitIndex,
-	//			"args.PrevLogIndex {} == rf.commitIndex {}",
-	//			args.PrevLogIndex, rf.commitIndex)
-	//	}
-	//}
 
 	// check PrevLogIndex and PrevLogTerm
 	// Make sure that this server know about PrevLogIndex,
@@ -809,9 +789,15 @@ func (rf *Raft) beforeSendAppendEntries(server int) *AppendEntriesArgs {
 		entries = make([]LogEntry, len(entriesToCopy))
 		copy(entries, entriesToCopy)
 
-		PanicIfF(rf.nextIndex[server] <= rf.snapshotTerm, "rf.nextIndex[server]<1, %d<1", rf.nextIndex[server] < 1)
+		AssertF(rf.nextIndex[server] > rf.snapshotIndex,
+			"rf.nextIndex[server] {%d} > rf.snapshotIndex {%d}",
+			rf.nextIndex[server], rf.snapshotIndex)
 		prevLogIndex = rf.nextIndex[server] - 1
 		prevLogTerm = rf.getTermForIndex(prevLogIndex)
+
+		AssertF(prevLogIndex == entries[0].Index-1,
+			"prevLogIndex {%d} == entries[0].Index-1 {%d}",
+			prevLogIndex, entries[0].Index-1)
 	}
 
 	return &AppendEntriesArgs{
@@ -843,23 +829,24 @@ func (rf *Raft) afterSendAppendEntries(server int, args *AppendEntriesArgs, repl
 
 	RaftDebug("Send AppendEntries to %d ++: reply = %v", rf, server, reply)
 
-	// should not work on stale RPC
-	if args.Term != rf.currentTerm {
-		return false
-	}
-
-	// 上锁之后检查consistency
-	if rf.status != Leader {
-		return false
-	}
+	AssertF(reply.Term >= args.Term, "")
+	AssertF(rf.currentTerm >= args.Term, "")
 
 	if rf.currentTerm < reply.Term {
-		// TODO: voteFor correct?
 		rf.transitionToFollower(reply.Term, server)
 		rf.persist()
 		isResetElectionTimer = true
 		return false
 	}
+
+	// should not work on stale RPC
+	if args.Term != rf.currentTerm || rf.currentTerm > reply.Term {
+		return false
+	}
+
+	AssertF(rf.status == Leader, "")
+	AssertF(rf.currentTerm == args.Term, "")
+	AssertF(rf.currentTerm == reply.Term, "")
 
 	//RaftDebug("append entries reply success? %v, reply term %d, from server %d", rf, reply.Success, reply.Term, server)
 
@@ -883,6 +870,7 @@ func (rf *Raft) sendAndCollectAppendEntries(server int) {
 		reply := &AppendEntriesReply{}
 		ok := rf.sendAppendEntries(server, args, reply)
 		if !ok {
+			return
 		}
 		rf.afterSendAppendEntries(server, args, reply)
 	}()
@@ -890,17 +878,32 @@ func (rf *Raft) sendAndCollectAppendEntries(server int) {
 
 func (rf *Raft) afterSendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
 	rf.mu.Lock()
+	isResetElectionTimer := false
 	defer func() {
 		rf.mu.Unlock()
+		rf.resetElectionTimerIf(isResetElectionTimer)
 	}()
 
 	RaftDebug("Send InstallSnapshot to %d ++: reply = %v", rf, server, reply)
 
-	if reply.Term > rf.currentTerm {
+	AssertF(reply.Term >= args.Term, "")
+	AssertF(rf.currentTerm >= args.Term, "")
+
+	if rf.currentTerm < reply.Term {
 		rf.transitionToFollower(reply.Term, server)
 		rf.persist()
+		isResetElectionTimer = true
 		return false
 	}
+
+	// should not work on stale RPC
+	if args.Term != rf.currentTerm || rf.currentTerm > reply.Term {
+		return false
+	}
+
+	AssertF(rf.status == Leader, "")
+	AssertF(rf.currentTerm == args.Term, "")
+	AssertF(rf.currentTerm == reply.Term, "")
 
 	// update nextIndex and matchIndex
 	rf.nextIndex[server] = args.LastIncludedIndex + 1
@@ -1109,18 +1112,18 @@ func (rf *Raft) doApply() {
 		} else {
 			// rf.snapshotIndex <= rf.lastApplied < rf.commitIndex
 			entries := make([]LogEntry, rf.commitIndex-rf.lastApplied)
-			commitIndexInThisApply := rf.commitIndex
 			RaftDebug("Applying: len(rf.logs) = %d, snapshotIndex=%d", rf, len(rf.logs), rf.snapshotIndex)
 			copy(entries, rf.logs[rf.getOffsetFromIndex(rf.lastApplied)+1:rf.getOffsetFromIndex(rf.commitIndex)+1])
 			//RaftForcePrint("Locally applying %d log entries. lastApplied: %d. commitIndex: %d",
 			//	rf, len(entries), rf.lastApplied, rf.commitIndex)
 
 			AssertF(rf.lastApplied+1 == entries[0].Index, "apply not in order!")
-			rf.lastApplied = MaxInt(rf.lastApplied, commitIndexInThisApply)
+			rf.lastApplied = MaxInt(rf.lastApplied, rf.commitIndex)
 
+			RaftForcePrint("Apply! %v", rf, entries)
 			rf.mu.Unlock()
 
-			for _, log := range entries {
+			for _, log0 := range entries {
 				select {
 				case <-rf.killCh:
 					// do we close rf.applyCh?
@@ -1128,11 +1131,12 @@ func (rf *Raft) doApply() {
 					return
 				case rf.applyCh <- ApplyMsg{
 					CommandValid: true,
-					CommandIndex: log.Index,
-					Command:      log.Command,
+					CommandIndex: log0.Index,
+					Command:      log0.Command,
 					Snapshot:     nil}:
 				}
 			}
+
 			time.Sleep(applyTimeout)
 		}
 	}
@@ -1146,7 +1150,7 @@ func (rf *Raft) periodicDump() {
 		default:
 		}
 
-		time.Sleep(2 * time.Second)
+		time.Sleep(500 * time.Millisecond)
 		rf.mu.Lock()
 
 		var logs []LogEntry
@@ -1156,8 +1160,8 @@ func (rf *Raft) periodicDump() {
 			logs = rf.logs
 		}
 
-		RaftForcePrint("[DUMP] snapShotIndex=%d, snapshotTerm=%d, commitIndex=%d, lastApplied=%d, currentTerm=%d, vodedFor=%d, status=%d, nextIndex=%v, matchIndex=%v, rf.logs[-10:]=%v",
-			rf, rf.snapshotIndex, rf.snapshotTerm, rf.commitIndex, rf.lastApplied, rf.currentTerm, rf.votedFor, rf.status, rf.nextIndex, rf.matchIndex, logs)
+		RaftForcePrint("[DUMP] snapShotIndex=%d, snapshotTerm=%d, commitIndex=%d, lastApplied=%d, currentTerm=%d, vodedFor=%d, status=%d, nextIndex=%v, matchIndex=%v, len(rf.logs)=%d, rf.Persister.RaftStateSize()=%d, rf.logs[-10:]=%v",
+			rf, rf.snapshotIndex, rf.snapshotTerm, rf.commitIndex, rf.lastApplied, rf.currentTerm, rf.votedFor, rf.status, rf.nextIndex, rf.matchIndex, len(rf.logs), rf.Persister.RaftStateSize(), logs)
 
 		rf.mu.Unlock()
 	}
@@ -1255,6 +1259,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 	rf.setCommitIndexAndApplyStateMachine(rf.snapshotIndex)
 	PanicIfF(rf.snapshotIndex > rf.commitIndex, "should not happen")
+	AssertF(rf.snapshotIndex <= rf.commitIndex,
+		"rf.snapshotIndex {%d} <= rf.commitIndex {%d}",
+		rf.snapshotIndex, rf.commitIndex)
 
 	RaftInfo("Started server", rf)
 

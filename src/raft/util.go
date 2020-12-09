@@ -16,8 +16,8 @@ const (
 )
 
 const (
-	RaftRPCTimeout        = 50 * time.Millisecond
-	HeartbeatTimeout      = 100 * time.Millisecond
+	RaftRPCTimeout        = 100 * time.Millisecond
+	HeartbeatTimeout      = 50 * time.Millisecond
 	electionBaseTimeout   = 400 * time.Millisecond
 	electionRandomTimeout = 400 * time.Millisecond
 	applyTimeout          = 100 * time.Millisecond
