@@ -7,7 +7,7 @@ import (
 )
 
 // Debugging
-const level = 0
+const level = 1
 
 const (
 	Follower = iota

@@ -161,7 +161,7 @@ func (rf *Raft) persistRaftStateAndSnapshot(snapshot []byte) {
 	buf := new(bytes.Buffer)
 	_ = gob.NewEncoder(buf).Encode(raftPersistence)
 
-	//RaftTrace("Persisting node data (%d bytes)", rf, buf.Len())
+	RaftDebug("Persisting node data", rf)
 	RaftTrace("Persisting node data, %v", rf, raftPersistence)
 
 	if len(snapshot) < 1 {
@@ -357,7 +357,6 @@ func (rf *Raft) setCommitIndexAndApplyStateMachine(commitIndex int) {
 			"commitIndex {%d} >= rf.snapshotIndex {%d}",
 			commitIndex, rf.snapshotIndex)
 		rf.commitIndex = commitIndex
-		RaftDebug("Commit to commitIndex: %d", rf, commitIndex)
 		RaftInfo("Commit to commitIndex: %d", rf, commitIndex)
 		rf.ApplyCond.Broadcast()
 	}
@@ -523,6 +522,9 @@ func (rf *Raft) updateNextIndexWhenAppendEntriesFail(server int, reply *AppendEn
 		rf.nextIndex[server] = reply.SuggestPrevLogIndex
 	}
 
+	RaftDebug("SendAppendEntries failed to %d ++: rf.nextIndex[%d]=%d",
+		rf, server, server, rf.nextIndex[server])
+
 	// assert 1 <= rf.nextIndex[server] <= rf.getLastIndex() + 1
 
 	// not needed
@@ -535,7 +537,7 @@ func (rf *Raft) updateNextIndexWhenAppendEntriesFail(server int, reply *AppendEn
 // lock outside
 func (rf *Raft) updateIndexesAndApplyWhenSuccess(server int, args *AppendEntriesArgs) {
 	if len(args.Entries) == 0 {
-		RaftDebug("heartbeat success to %d", rf, server)
+		RaftDebug("Heartbeat success to %d", rf, server)
 		return
 	}
 
@@ -550,7 +552,8 @@ func (rf *Raft) updateIndexesAndApplyWhenSuccess(server int, args *AppendEntries
 	rf.matchIndex[server] = MaxInt(rf.matchIndex[server], lastIndexNewlyAppendToServer)
 
 	rf.updateCommitIndex()
-	RaftTrace("Send AppendEntries to %d ++: new matchIndex = %d, commitIndex = %d",
+
+	RaftDebug("SendAppendEntries succeeded to %d ++: new matchIndex = %d, commitIndex = %d",
 		rf, server, rf.matchIndex[server], rf.commitIndex)
 }
 
@@ -836,7 +839,7 @@ func (rf *Raft) afterSendAppendEntries(server int, args *AppendEntriesArgs, repl
 		rf.resetElectionTimerIf(isResetElectionTimer)
 	}()
 
-	RaftTrace("Send AppendEntries to %d ++: reply = %v", rf, server, reply)
+	RaftTrace("SendAppendEntries to %d ++: reply = %v", rf, server, reply)
 
 	AssertF(reply.Term >= args.Term, "")
 	AssertF(rf.currentTerm >= args.Term, "")
@@ -945,6 +948,10 @@ func (rf *Raft) sendAndCollectInstallSnapshot(server int) {
 // No lock inside, should add lock outside
 // do not block
 func (rf *Raft) sendAllAppendEntriesOrInstallSnapshot() {
+	AssertF(rf.commitIndex >= rf.snapshotIndex,
+		"rf.commitIndex {%d} >= rf.snapshotIndex {%d}",
+		rf.commitIndex, rf.snapshotIndex)
+
 	if rf.status != Leader {
 		return
 	}
@@ -961,7 +968,7 @@ func (rf *Raft) sendAllAppendEntriesOrInstallSnapshot() {
 }
 
 func (rf *Raft) heartbeatDaemonProcess() {
-	RaftTrace("heartbeat daemon started\n", rf)
+	RaftDebug("heartbeat daemon started\n", rf)
 
 	for {
 		select {
@@ -971,7 +978,6 @@ func (rf *Raft) heartbeatDaemonProcess() {
 		}
 
 		rf.mu.Lock()
-		PanicIfF(rf.commitIndex < rf.snapshotIndex, "rf.commitIndex<rf.snapshotIndex")
 		CallWhenRepeatNTimes(10, func() { RaftTrace("heartbeat!\n", rf) })()
 		rf.sendAllAppendEntriesOrInstallSnapshot()
 		rf.mu.Unlock()
@@ -1006,7 +1012,7 @@ func (rf *Raft) doElection() {
 		return
 	}
 
-	RaftDebug("election timeout! start election\n", rf)
+	RaftDebug("Election timeout! start election\n", rf)
 	rf.transitionToCandidate()
 
 	args := &RequestVoteArgs{
@@ -1064,7 +1070,7 @@ func (rf *Raft) doElection() {
 
 			if voteCount*2 > len(rf.peers) {
 				rf.promoteToLeader()
-				RaftDebug("become leader", rf)
+				RaftDebug("Become leader", rf)
 			}
 		}(i)
 	}
@@ -1077,7 +1083,7 @@ func (rf *Raft) doApply() {
 			"rf.commitIndex {%d} >= rf.lastApplied {%d} Failed!",
 			rf.commitIndex, rf.lastApplied)
 
-		RaftInfo("rf.commitIndex {%d}, rf.lastApplied {%d}",
+		RaftTrace("rf.commitIndex {%d}, rf.lastApplied {%d}",
 			rf, rf.commitIndex, rf.lastApplied)
 
 		for rf.commitIndex == rf.lastApplied {
@@ -1091,6 +1097,9 @@ func (rf *Raft) doApply() {
 			default:
 			}
 		}
+
+		RaftInfo("rf.commitIndex {%d}, rf.lastApplied {%d}",
+			rf, rf.commitIndex, rf.lastApplied)
 
 		AssertF(rf.commitIndex > rf.lastApplied,
 			"rf.commitIndex {%d} > rf.lastApplied {%d} Failed!",
@@ -1129,7 +1138,7 @@ func (rf *Raft) doApply() {
 			AssertF(rf.lastApplied+1 == entries[0].Index, "apply not in order!")
 			rf.lastApplied = MaxInt(rf.lastApplied, rf.commitIndex)
 
-			RaftInfo("Apply! %v", rf, entries)
+			RaftInfo("Apply! len(entries)=%d , entries = %v", rf, len(entries), entries)
 			rf.mu.Unlock()
 
 			for _, log0 := range entries {

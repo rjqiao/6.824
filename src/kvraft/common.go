@@ -66,7 +66,7 @@ type GetReply struct {
 	Value       string
 }
 
-const level = 2
+const level = 1
 
 func KVServerInfo(format string, kv *KVServer, a ...interface{}) {
 	if level <= 1 {
