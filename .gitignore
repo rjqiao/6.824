@@ -7,3 +7,4 @@ api.key
 /src/playground/
 /bin/
 .vscode/
+venv/

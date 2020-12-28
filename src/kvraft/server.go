@@ -27,10 +27,7 @@ type KVServer struct {
 	data                  map[string]string          // Key -> Value
 	notifyCh              map[int]chan raft.ApplyMsg // logIndex -> channel
 	latestRequests        map[int64]RaftKVCommand    // ClerkId -> ReqSeq
-	// TODO: do not need $latestAppliedLogIndex?
 	latestAppliedLogIndex int                        // logIndex last applied
-
-	//snapshotIndex int
 
 	killCh chan bool
 }

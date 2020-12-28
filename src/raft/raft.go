@@ -679,6 +679,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.resetElectionTimerIf(goodHeartBeat)
 	}()
 
+	// check --- currentTerm, status, votedFor
+
+	// rf term ahead --- return false
+	// rf term behind --- reset election timer
+	// should not see rf is leader (assert term is same)
+	// rf is not follower --- reset election timer
+	// votedFor not LeaderId --- reset election timer
+	// transition to follower, go ahead
+
 	// args.Term --- rf.currentTerm
 
 	if args.Term < rf.currentTerm {
