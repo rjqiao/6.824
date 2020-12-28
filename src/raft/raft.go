@@ -161,8 +161,8 @@ func (rf *Raft) persistRaftStateAndSnapshot(snapshot []byte) {
 	buf := new(bytes.Buffer)
 	_ = gob.NewEncoder(buf).Encode(raftPersistence)
 
-	//RaftDebug("Persisting node data (%d bytes)", rf, buf.Len())
-	RaftDebug("Persisting node data, %v", rf, raftPersistence)
+	//RaftTrace("Persisting node data (%d bytes)", rf, buf.Len())
+	RaftTrace("Persisting node data, %v", rf, raftPersistence)
 
 	if len(snapshot) < 1 {
 		rf.Persister.SaveRaftState(buf.Bytes())
@@ -199,7 +199,7 @@ func (rf *Raft) readPersist(data []byte) {
 
 	rf.votedFor, rf.currentTerm, rf.logs, rf.snapshotIndex, rf.snapshotTerm =
 		obj.VotedFor, obj.CurrentTerm, obj.Logs, obj.SnapshotIndex, obj.SnapshotTerm
-	RaftInfo("Loaded persisted node data (%d bytes). Last applied index: %d", rf, len(data), rf.lastApplied)
+	RaftDebug("Loaded persisted node data (%d bytes). Last applied index: %d", rf, len(data), rf.lastApplied)
 }
 
 type AppendEntriesArgs struct {
@@ -258,11 +258,11 @@ func (rf *Raft) PersistSnapshotAndDiscardLogs(lastIncludedSnapshotIndex int, sna
 	defer rf.mu.Unlock()
 
 	if lastIncludedSnapshotIndex <= rf.snapshotIndex {
-		RaftForcePrint("appliedIndex {%d} fall behind snapshotIndex {%d}", rf, lastIncludedSnapshotIndex, rf.snapshotIndex)
+		RaftInfo("appliedIndex {%d} fall behind snapshotIndex {%d}", rf, lastIncludedSnapshotIndex, rf.snapshotIndex)
 		return
 	}
 
-	RaftForcePrint("lastIncludedSnapshotIndex = %d, rf.snapshotIndex = %d", rf, lastIncludedSnapshotIndex, rf.snapshotIndex)
+	RaftInfo("lastIncludedSnapshotIndex = %d, rf.snapshotIndex = %d", rf, lastIncludedSnapshotIndex, rf.snapshotIndex)
 	// Does not work when receiving InstallSnapshot just now
 	//AssertF(rf.getOffsetFromIndex(lastIncludedSnapshotIndex) >= 0,
 	//	"rf.getOffsetFromIndex(lastIncludedSnapshotIndex) {%d} >= 0}",
@@ -320,7 +320,7 @@ func (rf *Raft) transitionToCandidate() {
 }
 
 func (rf *Raft) transitionToFollower(newTerm int, votedFor int) {
-	RaftInfo("transit to follower, new term: %d", rf, newTerm)
+	RaftDebug("transit to follower, new term: %d", rf, newTerm)
 	rf.status = Follower
 	rf.currentTerm = newTerm
 	rf.votedFor = votedFor
@@ -357,8 +357,8 @@ func (rf *Raft) setCommitIndexAndApplyStateMachine(commitIndex int) {
 			"commitIndex {%d} >= rf.snapshotIndex {%d}",
 			commitIndex, rf.snapshotIndex)
 		rf.commitIndex = commitIndex
+		RaftDebug("Commit to commitIndex: %d", rf, commitIndex)
 		RaftInfo("Commit to commitIndex: %d", rf, commitIndex)
-		RaftForcePrint("Commit to commitIndex: %d", rf, commitIndex)
 		rf.ApplyCond.Broadcast()
 	}
 }
@@ -535,7 +535,7 @@ func (rf *Raft) updateNextIndexWhenAppendEntriesFail(server int, reply *AppendEn
 // lock outside
 func (rf *Raft) updateIndexesAndApplyWhenSuccess(server int, args *AppendEntriesArgs) {
 	if len(args.Entries) == 0 {
-		RaftInfo("heartbeat success to %d", rf, server)
+		RaftDebug("heartbeat success to %d", rf, server)
 		return
 	}
 
@@ -550,7 +550,7 @@ func (rf *Raft) updateIndexesAndApplyWhenSuccess(server int, args *AppendEntries
 	rf.matchIndex[server] = MaxInt(rf.matchIndex[server], lastIndexNewlyAppendToServer)
 
 	rf.updateCommitIndex()
-	RaftDebug("Send AppendEntries to %d ++: new matchIndex = %d, commitIndex = %d",
+	RaftTrace("Send AppendEntries to %d ++: new matchIndex = %d, commitIndex = %d",
 		rf, server, rf.matchIndex[server], rf.commitIndex)
 }
 
@@ -663,7 +663,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 	reply.Term = rf.currentTerm
 
-	RaftDebug("InstallSnapshot:", rf)
+	RaftTrace("InstallSnapshot:", rf)
 
 	if rf.commitIndex < args.LastIncludedIndex {
 	}
@@ -707,7 +707,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	AssertF(rf.status == Follower && rf.currentTerm == args.Term, "")
 
-	RaftDebug("AppendEntries: args.LeaderCommit = %d", rf, args.LeaderCommit)
+	RaftTrace("AppendEntries: args.LeaderCommit = %d", rf, args.LeaderCommit)
 
 	reply.Term = rf.currentTerm
 
@@ -836,7 +836,7 @@ func (rf *Raft) afterSendAppendEntries(server int, args *AppendEntriesArgs, repl
 		rf.resetElectionTimerIf(isResetElectionTimer)
 	}()
 
-	RaftDebug("Send AppendEntries to %d ++: reply = %v", rf, server, reply)
+	RaftTrace("Send AppendEntries to %d ++: reply = %v", rf, server, reply)
 
 	AssertF(reply.Term >= args.Term, "")
 	AssertF(rf.currentTerm >= args.Term, "")
@@ -857,7 +857,7 @@ func (rf *Raft) afterSendAppendEntries(server int, args *AppendEntriesArgs, repl
 	AssertF(rf.currentTerm == args.Term, "")
 	AssertF(rf.currentTerm == reply.Term, "")
 
-	//RaftDebug("append entries reply success? %v, reply term %d, from server %d", rf, reply.Success, reply.Term, server)
+	//RaftTrace("append entries reply success? %v, reply term %d, from server %d", rf, reply.Success, reply.Term, server)
 
 	// side effect
 	if reply.Success {
@@ -893,7 +893,7 @@ func (rf *Raft) afterSendInstallSnapshot(server int, args *InstallSnapshotArgs, 
 		rf.resetElectionTimerIf(isResetElectionTimer)
 	}()
 
-	RaftDebug("Send InstallSnapshot to %d ++: reply = %v", rf, server, reply)
+	RaftTrace("Send InstallSnapshot to %d ++: reply = %v", rf, server, reply)
 
 	AssertF(reply.Term >= args.Term, "")
 	AssertF(rf.currentTerm >= args.Term, "")
@@ -961,7 +961,7 @@ func (rf *Raft) sendAllAppendEntriesOrInstallSnapshot() {
 }
 
 func (rf *Raft) heartbeatDaemonProcess() {
-	RaftDebug("heartbeat daemon started\n", rf)
+	RaftTrace("heartbeat daemon started\n", rf)
 
 	for {
 		select {
@@ -972,7 +972,7 @@ func (rf *Raft) heartbeatDaemonProcess() {
 
 		rf.mu.Lock()
 		PanicIfF(rf.commitIndex < rf.snapshotIndex, "rf.commitIndex<rf.snapshotIndex")
-		CallWhenRepeatNTimes(10, func() { RaftDebug("heartbeat!\n", rf) })()
+		CallWhenRepeatNTimes(10, func() { RaftTrace("heartbeat!\n", rf) })()
 		rf.sendAllAppendEntriesOrInstallSnapshot()
 		rf.mu.Unlock()
 		// 后sleep！！！
@@ -1006,7 +1006,7 @@ func (rf *Raft) doElection() {
 		return
 	}
 
-	RaftInfo("election timeout! start election\n", rf)
+	RaftDebug("election timeout! start election\n", rf)
 	rf.transitionToCandidate()
 
 	args := &RequestVoteArgs{
@@ -1024,10 +1024,10 @@ func (rf *Raft) doElection() {
 			continue
 		}
 		go func(i int) {
-			//RaftDebug("do Election %d -> %d, start term %d", rf, rf.me, i, args.Term)
+			//RaftTrace("do Election %d -> %d, start term %d", rf, rf.me, i, args.Term)
 			reply := &RequestVoteReply{}
 			ok := rf.sendRequestVote(i, args, reply)
-			//RaftDebug("do Election reply %d -> %d, start-term %d, reply : %v", rf, rf.me, i, args.Term, reply)
+			//RaftTrace("do Election reply %d -> %d, start-term %d, reply : %v", rf, rf.me, i, args.Term, reply)
 			if !ok {
 				return
 			}
@@ -1064,7 +1064,7 @@ func (rf *Raft) doElection() {
 
 			if voteCount*2 > len(rf.peers) {
 				rf.promoteToLeader()
-				RaftInfo("become leader", rf)
+				RaftDebug("become leader", rf)
 			}
 		}(i)
 	}
@@ -1077,7 +1077,7 @@ func (rf *Raft) doApply() {
 			"rf.commitIndex {%d} >= rf.lastApplied {%d} Failed!",
 			rf.commitIndex, rf.lastApplied)
 
-		RaftForcePrint("rf.commitIndex {%d}, rf.lastApplied {%d}",
+		RaftInfo("rf.commitIndex {%d}, rf.lastApplied {%d}",
 			rf, rf.commitIndex, rf.lastApplied)
 
 		for rf.commitIndex == rf.lastApplied {
@@ -1103,7 +1103,7 @@ func (rf *Raft) doApply() {
 		// When kvraft triggers a snapshot, we do not need to re-install snapshot back to kvraft
 		// check if we should install snapshot to kvraft
 		if rf.lastApplied < rf.snapshotIndex {
-			RaftForcePrint("Apply Install Snapshot, snapshotIndex=%d, lastApplied=%d", rf, rf.snapshotIndex, rf.lastApplied)
+			RaftInfo("Apply Install Snapshot, snapshotIndex=%d, lastApplied=%d", rf, rf.snapshotIndex, rf.lastApplied)
 			// rf.lastApplied < rf.snapshotIndex <= rf.commitIndex
 			rf.lastApplied = MaxInt(rf.lastApplied, rf.snapshotIndex)
 			rf.mu.Unlock()
@@ -1121,15 +1121,15 @@ func (rf *Raft) doApply() {
 		} else {
 			// rf.snapshotIndex <= rf.lastApplied < rf.commitIndex
 			entries := make([]LogEntry, rf.commitIndex-rf.lastApplied)
-			RaftDebug("Applying: len(rf.logs) = %d, snapshotIndex=%d", rf, len(rf.logs), rf.snapshotIndex)
+			RaftTrace("Applying: len(rf.logs) = %d, snapshotIndex=%d", rf, len(rf.logs), rf.snapshotIndex)
 			copy(entries, rf.logs[rf.getOffsetFromIndex(rf.lastApplied)+1:rf.getOffsetFromIndex(rf.commitIndex)+1])
-			//RaftForcePrint("Locally applying %d log entries. lastApplied: %d. commitIndex: %d",
+			//RaftInfo("Locally applying %d log entries. lastApplied: %d. commitIndex: %d",
 			//	rf, len(entries), rf.lastApplied, rf.commitIndex)
 
 			AssertF(rf.lastApplied+1 == entries[0].Index, "apply not in order!")
 			rf.lastApplied = MaxInt(rf.lastApplied, rf.commitIndex)
 
-			RaftForcePrint("Apply! %v", rf, entries)
+			RaftInfo("Apply! %v", rf, entries)
 			rf.mu.Unlock()
 
 			for _, log0 := range entries {
@@ -1169,7 +1169,7 @@ func (rf *Raft) periodicDump() {
 			logs = rf.logs
 		}
 
-		RaftForcePrint("[DUMP] snapShotIndex=%d, snapshotTerm=%d, commitIndex=%d, lastApplied=%d, currentTerm=%d, vodedFor=%d, status=%d, nextIndex=%v, matchIndex=%v, len(rf.logs)=%d, rf.Persister.RaftStateSize()=%d, rf.logs[-10:]=%v",
+		RaftInfo("[DUMP] snapShotIndex=%d, snapshotTerm=%d, commitIndex=%d, lastApplied=%d, currentTerm=%d, vodedFor=%d, status=%d, nextIndex=%v, matchIndex=%v, len(rf.logs)=%d, rf.Persister.RaftStateSize()=%d, rf.logs[-10:]=%v",
 			rf, rf.snapshotIndex, rf.snapshotTerm, rf.commitIndex, rf.lastApplied, rf.currentTerm, rf.votedFor, rf.status, rf.nextIndex, rf.matchIndex, len(rf.logs), rf.Persister.RaftStateSize(), logs)
 
 		rf.mu.Unlock()
@@ -1208,7 +1208,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.sendAllAppendEntriesOrInstallSnapshot() // broadcast new log to followers
 	rf.persist()
 	AssertF(rf.getOffsetFromIndex(index) < len(rf.logs), "index=%d, len(rf.logs)=%d, rf.snapshotIndex=%d", index, len(rf.logs), rf.snapshotIndex)
-	RaftForcePrint("New entry appended to leader's log: %v", rf, rf.logs[rf.getOffsetFromIndex(index)])
+	RaftInfo("New entry appended to leader's log: %v", rf, rf.logs[rf.getOffsetFromIndex(index)])
 
 	return index, term, isLeader
 }
@@ -1226,7 +1226,7 @@ func (rf *Raft) Kill() {
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	RaftInfo("Killed!", rf)
+	RaftDebug("Killed!", rf)
 }
 
 //
@@ -1272,7 +1272,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		"rf.snapshotIndex {%d} <= rf.commitIndex {%d}",
 		rf.snapshotIndex, rf.commitIndex)
 
-	RaftInfo("Started server", rf)
+	RaftDebug("Started server", rf)
 
 	// debug only
 	rf.nanoSecCreated = time.Now().UnixNano()

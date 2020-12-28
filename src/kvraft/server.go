@@ -42,7 +42,7 @@ func (kv *KVServer) needSnapShot() bool {
 	if kv.maxraftstate < 0 {
 		return false
 	}
-	KVServerForce("kv.rf.Persister.RaftStateSize()=%d, kv.maxraftstate=%d", kv, kv.rf.Persister.RaftStateSize(), kv.maxraftstate)
+	KVServerInfo("kv.rf.Persister.RaftStateSize()=%d, kv.maxraftstate=%d", kv, kv.rf.Persister.RaftStateSize(), kv.maxraftstate)
 	if kv.rf.Persister.RaftStateSize() > kv.maxraftstate {
 		return true
 	}
@@ -76,7 +76,7 @@ func (kv *KVServer) applySnapshot(data []byte) {
 	_ = d.Decode(&snapShotPersistence)
 
 	kv.data = snapShotPersistence.Data
-	KVServerForce("latestAppliedLogIndex=%d, snapShotPersistence.LatestAppliedLogIndex=%d",kv, kv.latestAppliedLogIndex, snapShotPersistence.LatestAppliedLogIndex)
+	KVServerInfo("latestAppliedLogIndex=%d, snapShotPersistence.LatestAppliedLogIndex=%d",kv, kv.latestAppliedLogIndex, snapShotPersistence.LatestAppliedLogIndex)
 	kv.latestAppliedLogIndex = snapShotPersistence.LatestAppliedLogIndex
 	kv.latestRequests = snapShotPersistence.LatestRequests
 
@@ -106,7 +106,7 @@ func (kv *KVServer) handleApplyMsg() {
 
 			kv.mu.Lock()
 
-			KVServerInfo("get from ApplyCh, ClerkId: %d, ReqSeq: %d, Op: %s, Key: %s, Value: %s, CommitIndex: %d", kv,
+			KVServerDebug("get from ApplyCh, ClerkId: %d, ReqSeq: %d, Op: %s, Key: %s, Value: %s, CommitIndex: %d", kv,
 				command.ClerkId, command.RequestSeq, command.Op, command.Key, command.Value, msg.CommandIndex)
 
 			raft.AssertF(kv.latestAppliedLogIndex < msg.CommandIndex, "should not see obsolete apply")
@@ -126,14 +126,14 @@ func (kv *KVServer) handleApplyMsg() {
 					kv.data[command.Key] += command.Value // What happen when nil?
 				}
 				command.Value = kv.data[command.Key] // case "Get"
-				KVServerInfo("In db (non dup) -- Op: %s, Key: %s, Value: %s", kv, command.Op, command.Key, command.Value)
+				KVServerDebug("In db (non dup) -- Op: %s, Key: %s, Value: %s", kv, command.Op, command.Key, command.Value)
 				kv.latestRequests[command.ClerkId] = command
 			} else {
 				raft.PanicIfF(lastCommand.Key != command.Key,
 					"Key should be same, ClerkId: %d, ReqSeq: %d, Op: %s, Key: %s, Value: %s, CommitIndex: %d, ",
 					command.ClerkId, command.RequestSeq, command.Op, command.Key, command.Value, msg.CommandIndex)
 				command.Value = lastCommand.Value
-				KVServerInfo("In db (dup) -- Op: %s, Key: %s, Value: %s", kv, command.Op, command.Key, command.Value)
+				KVServerDebug("In db (dup) -- Op: %s, Key: %s, Value: %s", kv, command.Op, command.Key, command.Value)
 			}
 			msg.Command = command
 			kv.latestAppliedLogIndex = msg.CommandIndex
@@ -162,7 +162,7 @@ func (kv *KVServer) handleApplyMsg() {
 					close(ch)
 				}()
 			} else {
-				KVServerInfo("get from ApplyCh, channel failure", kv)
+				KVServerDebug("get from ApplyCh, channel failure", kv)
 			}
 			kv.mu.Unlock()
 
@@ -203,7 +203,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	kv.notifyCh[index] = make(chan raft.ApplyMsg)
 	ch := kv.notifyCh[index]
 
-	KVServerInfo("Get received: index -- %d, key: %x", kv, index, args.Key)
+	KVServerDebug("Get received: index -- %d, key: %x", kv, index, args.Key)
 	kv.mu.Unlock()
 
 	timer := time.After(KvServerWaitNotifyChTimeout)
@@ -212,7 +212,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		// what if
 		case msg, ok := <-ch:
 			if !ok {
-				KVServerInfo("channel has been deleted in Get", kv)
+				KVServerDebug("channel has been deleted in Get", kv)
 				*reply = GetReply{WrongLeader: false, Err: ErrStaleIndex}
 				return
 			}
@@ -223,13 +223,13 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 				//panic("should not happen! The command received should have same (reqSeq, clerkId) pair")
 
 				// stale channel, early finish
-				KVServerInfo("command has different (reqSeq, clerkId) pair, (%d,%d)!=(%d,%d)",
+				KVServerDebug("command has different (reqSeq, clerkId) pair, (%d,%d)!=(%d,%d)",
 					kv, notifiedCommand.RequestSeq, notifiedCommand.ClerkId, command.RequestSeq, command.ClerkId)
 				*reply = GetReply{WrongLeader: false, Err: ErrStaleIndex}
 				return
 			}
 
-			KVServerInfo("Got reply -- Op: %s, ClerkId: %d. ReqSeq: %d, Key: %x, Value: %x", kv,
+			KVServerDebug("Got reply -- Op: %s, ClerkId: %d. ReqSeq: %d, Key: %x, Value: %x", kv,
 				notifiedCommand.Op, notifiedCommand.ClerkId, notifiedCommand.RequestSeq, notifiedCommand.Key, notifiedCommand.Value)
 
 			*reply = GetReply{WrongLeader: false, Err: OK, Value: notifiedCommand.Value}
@@ -283,7 +283,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.mu.Lock()
 	index, _, isLeader := kv.rf.Start(command)
 
-	KVServerInfo("%s received: index -- %d, key: %s, value: %s, isLeader: %t", kv, op, index, args.Key, args.Value, isLeader)
+	KVServerDebug("%s received: index -- %d, key: %s, value: %s, isLeader: %t", kv, op, index, args.Key, args.Value, isLeader)
 
 	if !isLeader {
 		kv.mu.Unlock()
@@ -300,7 +300,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.notifyCh[index] = make(chan raft.ApplyMsg)
 	ch := kv.notifyCh[index]
 
-	KVServerInfo("%s received: index -- %d, key: %x, value: %x", kv, op, index, args.Key, args.Value)
+	KVServerDebug("%s received: index -- %d, key: %x, value: %x", kv, op, index, args.Key, args.Value)
 	kv.mu.Unlock()
 
 	timer := time.After(KvServerWaitNotifyChTimeout)
@@ -311,14 +311,14 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		// may not receive from $ch, just block here.
 		case msg, ok := <-ch:
 			if !ok {
-				KVServerInfo("channel has been deleted in PutAppend", kv)
+				KVServerDebug("channel has been deleted in PutAppend", kv)
 				*reply = PutAppendReply{WrongLeader: false, Err: ErrStaleIndex}
 				return
 			}
 
 			notifiedCommand := msg.Command.(RaftKVCommand)
 
-			KVServerInfo("Got reply -- Op: %s, ClerkId: %d. ReqSeq: %d, Key: %s, Value: %s, CommitIndex: %d", kv,
+			KVServerDebug("Got reply -- Op: %s, ClerkId: %d. ReqSeq: %d, Key: %s, Value: %s, CommitIndex: %d", kv,
 				notifiedCommand.Op, notifiedCommand.ClerkId, notifiedCommand.RequestSeq, notifiedCommand.Key, notifiedCommand.Value, msg.CommandIndex)
 
 			// make sure $command (receive from $ch) is the same (reqSeq, clerkId) one
@@ -328,14 +328,14 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 				//return
 
 				// stale channel, early finish
-				KVServerInfo("command has different (reqSeq, clerkId) pair, (%d,%d)!=(%d,%d)",
+				KVServerDebug("command has different (reqSeq, clerkId) pair, (%d,%d)!=(%d,%d)",
 					kv, notifiedCommand.RequestSeq, notifiedCommand.ClerkId, command.RequestSeq, command.ClerkId)
 				*reply = PutAppendReply{WrongLeader: false, Err: ErrStaleIndex}
 				return
 			}
 
 			*reply = PutAppendReply{WrongLeader: false, Err: OK}
-			KVServerInfo("PutAppend RPC Return!", kv)
+			KVServerDebug("PutAppend RPC Return!", kv)
 			return
 
 		// KV Server and Raft in same process (goroutine) and crash at same time
@@ -379,7 +379,7 @@ func (kv *KVServer) Kill() {
 
 	kv.mu.Lock()
 	kv.rf.Kill()
-	KVServerInfo("Killed!", kv)
+	KVServerDebug("Killed!", kv)
 	defer kv.mu.Unlock()
 
 }

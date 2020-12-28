@@ -7,7 +7,7 @@ import (
 )
 
 // Debugging
-const Debug = 0
+const level = 0
 
 const (
 	Follower = iota
@@ -29,34 +29,41 @@ func init() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 }
 
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug > 0 {
-		log.Printf(format, a...)
+func RaftError(format string, rf *Raft, a ...interface{}) {
+	if level <= 3 {
+		args := append([]interface{}{rf.me, rf.currentTerm, rf.status}, a...)
+		log.Printf("[ERROR] Raft: [Id: %d | Term: %d | %v] "+format, args...)
 	}
-	return
 }
 
-func RaftForcePrint(format string, rf *Raft, a ...interface{}) {
-	args := append([]interface{}{rf.me, rf.currentTerm, rf.status}, a...)
-	log.Printf("[Force] Raft: [Id: %d | Term: %d | %v] "+format, args...)
-	return
+func RaftWarning(format string, rf *Raft, a ...interface{}) {
+	if level <= 2 {
+		args := append([]interface{}{rf.me, rf.currentTerm, rf.status}, a...)
+		log.Printf("[WARNING] Raft: [Id: %d | Term: %d | %v] "+format, args...)
+	}
 }
 
 func RaftInfo(format string, rf *Raft, a ...interface{}) {
-	if Debug > 0 {
+	if level <= 1 {
 		args := append([]interface{}{rf.me, rf.currentTerm, rf.status}, a...)
 		log.Printf("[INFO] Raft: [Id: %d | Term: %d | %v] "+format, args...)
 	}
-	return
 }
 
 func RaftDebug(format string, rf *Raft, a ...interface{}) {
-	if Debug > 1 {
+	if level <= 0 {
 		args := append([]interface{}{rf.me, rf.currentTerm, rf.status}, a...)
-		log.Printf("[DEBUG] Raft: [Created at: %v | Id: %d | Term: %d | %v] "+format, args...)
+		log.Printf("[ERROR] Raft: [Id: %d | Term: %d | %v] "+format, args...)
 	}
-	return
 }
+
+func RaftTrace(format string, rf *Raft, a ...interface{}) {
+	if level <= -1 {
+		args := append([]interface{}{rf.me, rf.currentTerm, rf.status}, a...)
+		log.Printf("[TRACE] Raft: [Created at: %v | Id: %d | Term: %d | %v] "+format, args...)
+	}
+}
+
 
 func CallWhenRepeatNTimes(n int, f func()) func() {
 	count := 0

@@ -66,26 +66,25 @@ type GetReply struct {
 	Value       string
 }
 
-const Debug = 0
+const level = 2
 
 func KVServerInfo(format string, kv *KVServer, a ...interface{}) {
-	if Debug > 0 {
+	if level <= 1 {
 		args := append([]interface{}{kv.me}, a...)
 		log.Printf("[INFO] RaftKV: [Id: %d] "+format, args...)
 	}
-	return
 }
 
 func KVServerDebug(format string, kv *KVServer, a ...interface{}) {
-	if Debug > 1 {
+	if level <= 0 {
 		args := append([]interface{}{kv.me}, a...)
-		log.Printf("[Debug] RaftKV: [Id: %d] "+format, args...)
+		log.Printf("[DEBUG] RaftKV: [Id: %d] "+format, args...)
 	}
-	return
 }
 
-func KVServerForce(format string, kv *KVServer, a ...interface{}) {
-	args := append([]interface{}{kv.me}, a...)
-	log.Printf("[Force] RaftKV: [Id: %d] "+format, args...)
-	return
+func KVServerTrace(format string, kv *KVServer, a ...interface{}) {
+	if level <= -1 {
+		args := append([]interface{}{kv.me}, a...)
+		log.Printf("[TRACE] RaftKV: [Id: %d] "+format, args...)
+	}
 }
