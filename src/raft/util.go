@@ -7,7 +7,7 @@ import (
 )
 
 // Debugging
-const level = 1
+const level = 0
 
 const (
 	Follower = iota
@@ -16,7 +16,7 @@ const (
 )
 
 const (
-	RaftRPCTimeout        = 100 * time.Millisecond
+	RaftRPCTimeout        = 200 * time.Millisecond
 	HeartbeatTimeout      = 50 * time.Millisecond
 	electionBaseTimeout   = 400 * time.Millisecond
 	electionRandomTimeout = 400 * time.Millisecond
@@ -53,7 +53,7 @@ func RaftInfo(format string, rf *Raft, a ...interface{}) {
 func RaftDebug(format string, rf *Raft, a ...interface{}) {
 	if level <= 0 {
 		args := append([]interface{}{rf.me, rf.currentTerm, rf.status}, a...)
-		log.Printf("[ERROR] Raft: [Id: %d | Term: %d | %v] "+format, args...)
+		log.Printf("[DEBUG] Raft: [Id: %d | Term: %d | %v] "+format, args...)
 	}
 }
 
@@ -63,7 +63,6 @@ func RaftTrace(format string, rf *Raft, a ...interface{}) {
 		log.Printf("[TRACE] Raft: [Created at: %v | Id: %d | Term: %d | %v] "+format, args...)
 	}
 }
-
 
 func CallWhenRepeatNTimes(n int, f func()) func() {
 	count := 0
@@ -77,8 +76,16 @@ func CallWhenRepeatNTimes(n int, f func()) func() {
 
 func SendRPCRequestWithRetry(requestName string, rpcTimeout time.Duration, retryTimes int, requestBlock func() bool) bool {
 	for i := 0; i < retryTimes; i++ {
-		if requestBlock() {
-			return true
+		ch := make(chan bool)
+		go func() {
+			ch <- requestBlock()
+		}()
+
+		select {
+		case <-time.After(rpcTimeout):
+			continue
+		case res := <-ch:
+			return res
 		}
 	}
 	return false

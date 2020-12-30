@@ -370,26 +370,27 @@ func GenericTestLinearizability(t *testing.T, part string, nclients int, nserver
 		atomic.StoreInt32(&done_partitioner, 1) // tell partitioner to quit
 
 		if partitions {
-			// log.Printf("wait for partitioner\n")
+			log.Printf("wait for partitioner\n")
 			<-ch_partitioner
 			// reconnect network and submit a request. A client may
 			// have submitted a request in a minority.  That request
 			// won't return until that server discovers a new term
 			// has started.
 			cfg.ConnectAll()
+			log.Printf("reconnected\n")
 			// wait for a while so that we have a new term
 			time.Sleep(electionTimeout)
 		}
 
 		if crash {
-			// log.Printf("shutdown servers\n")
+			log.Printf("shutdown servers\n")
 			for i := 0; i < nservers; i++ {
 				cfg.ShutdownServer(i)
 			}
 			// Wait for a while for servers to shutdown, since
 			// shutdown isn't a real crash and isn't instantaneous
 			time.Sleep(electionTimeout)
-			// log.Printf("restart servers\n")
+			log.Printf("restart servers\n")
 			// crash and re-start all
 			for i := 0; i < nservers; i++ {
 				cfg.StartServer(i)
