@@ -25,7 +25,7 @@ type KVServer struct {
 
 	// View of log, will eventually consistent to raft logs
 	data                  map[string]string          // Key -> Value
-	notifyCh              map[int]chan raft.ApplyMsg // logIndex -> channel
+	notifyChs             map[int]chan raft.ApplyMsg // logIndex -> channel
 	latestRequests        map[int64]RaftKVCommand    // ClerkId -> ReqSeq
 	latestAppliedLogIndex int                        // logIndex last applied
 
@@ -147,10 +147,10 @@ func (kv *KVServer) handleApplyMsg() {
 			}
 
 			// !ok
-			// 1. Not leader, so no kv.notifyCh[msg.CommandIndex] created
+			// 1. Not leader, so no kv.notifyChs[msg.CommandIndex] created
 			// 2. stale or short cut request ??
-			if ch, ok := kv.notifyCh[msg.CommandIndex]; ok {
-				delete(kv.notifyCh, msg.CommandIndex)
+			if ch, ok := kv.notifyChs[msg.CommandIndex]; ok {
+				delete(kv.notifyChs, msg.CommandIndex)
 
 				go func() {
 					timeout := 500 * time.Millisecond
@@ -194,14 +194,14 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 
 	// delete and close old channel, interrupt (old lastIndex) RPC and then return with error (maybe DeprecateReq)
-	if _, ok := kv.notifyCh[index]; ok {
-		// only remove $ch from notifyCh map, but do not close it.
+	if _, ok := kv.notifyChs[index]; ok {
+		// only remove $ch from notifyChs map, but do not close it.
 		// $ch will finally be closed in producer side
-		delete(kv.notifyCh, index)
+		delete(kv.notifyChs, index)
 	}
 
-	kv.notifyCh[index] = make(chan raft.ApplyMsg)
-	ch := kv.notifyCh[index]
+	kv.notifyChs[index] = make(chan raft.ApplyMsg)
+	ch := kv.notifyChs[index]
 
 	KVServerDebug("Get received: index -- %d, key: %x", kv, index, args.Key)
 	kv.mu.Unlock()
@@ -242,8 +242,8 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			}
 		case <-timer:
 			kv.mu.Lock()
-			if ch0, ok := kv.notifyCh[index]; ok && ch0 == ch {
-				delete(kv.notifyCh, index)
+			if ch0, ok := kv.notifyChs[index]; ok && ch0 == ch {
+				delete(kv.notifyChs, index)
 			}
 			kv.mu.Unlock()
 			*reply = GetReply{WrongLeader: false, Err: ErrUnknown, Value: ""}
@@ -257,7 +257,7 @@ func (kv *KVServer) getCheckIsLeader(reply *GetReply, index int) bool {
 	defer kv.mu.Unlock()
 	if _, isLeader := kv.rf.GetState(); !isLeader {
 		*reply = GetReply{WrongLeader: true, Err: ErrWrongLeader}
-		delete(kv.notifyCh, index)
+		delete(kv.notifyChs, index)
 		return false
 	}
 	return true
@@ -291,14 +291,14 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 
-	if _, ok := kv.notifyCh[index]; ok {
-		// only remove $ch from notifyCh map, but do not close it.
+	if _, ok := kv.notifyChs[index]; ok {
+		// only remove $ch from notifyChs map, but do not close it.
 		// $ch will finally be closed in producer side
-		delete(kv.notifyCh, index)
+		delete(kv.notifyChs, index)
 	}
 
-	kv.notifyCh[index] = make(chan raft.ApplyMsg)
-	ch := kv.notifyCh[index]
+	kv.notifyChs[index] = make(chan raft.ApplyMsg)
+	ch := kv.notifyChs[index]
 
 	KVServerDebug("%s received: index -- %d, key: %x, value: %x", kv, op, index, args.Key, args.Value)
 	kv.mu.Unlock()
@@ -346,8 +346,8 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			}
 		case <-timer:
 			kv.mu.Lock()
-			if ch0, ok := kv.notifyCh[index]; ok && ch0 == ch {
-				delete(kv.notifyCh, index)
+			if ch0, ok := kv.notifyChs[index]; ok && ch0 == ch {
+				delete(kv.notifyChs, index)
 			}
 			kv.mu.Unlock()
 			*reply = PutAppendReply{WrongLeader: false, Err: ErrUnknown}
@@ -362,7 +362,7 @@ func (kv *KVServer) putAppendCheckIsLeader(reply *PutAppendReply, index int) boo
 	defer kv.mu.Unlock()
 	if _, isLeader := kv.rf.GetState(); !isLeader {
 		*reply = PutAppendReply{WrongLeader: true, Err: ErrWrongLeader}
-		delete(kv.notifyCh, index)
+		delete(kv.notifyChs, index)
 		return false
 	}
 	return true
@@ -410,7 +410,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 
 	kv.data = make(map[string]string)
-	kv.notifyCh = make(map[int]chan raft.ApplyMsg)
+	kv.notifyChs = make(map[int]chan raft.ApplyMsg)
 	kv.latestRequests = make(map[int64]RaftKVCommand)
 	kv.latestAppliedLogIndex = 0
 
@@ -420,8 +420,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 
-	// 不应该在开始的时候install snapshot？
-	//kv.applySnapshot(persister.ReadSnapshot())
+	// should not applySnapshot at start of KV server
 	kv.applyCh = make(chan raft.ApplyMsg, 1000)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 

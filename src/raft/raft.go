@@ -175,6 +175,8 @@ func (rf *Raft) persistRaftStateAndSnapshot(snapshot []byte) {
 // restore previously persisted state.
 //
 func (rf *Raft) readPersist(data []byte) {
+	// TODO: remove $data argument?
+	// Handle empty $data
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
@@ -1217,12 +1219,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
+	rf.mu.Lock()
+	RaftDebug("Killed!", rf)
+	rf.mu.Unlock()
+
 	close(rf.killCh)
 	//close(rf.applyCh)
-
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	RaftDebug("Killed!", rf)
 }
 
 //
