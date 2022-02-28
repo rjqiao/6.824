@@ -55,9 +55,15 @@ type ClerkIdType int64
 type RequestSequenceType int64
 
 type HashNode interface {
-	GetPos() uint32
+	// Need a total ordering of the node.
+	// first key -- pos
+	// second key -- type, shard is 0, group is 1
+	// Should not see same type && same position?
+	// third key -- use Id -- shardId or groupId
+	GetPos() uint32 // position in the ring.
 	GetTypePoint() uint32
 	GetKey() uint32
+	GetId() uint32
 }
 
 type ShardNode struct {
@@ -65,19 +71,23 @@ type ShardNode struct {
 }
 
 func (sn ShardNode) GetPos() uint32 {
-	return hash(math.MaxUint32/NShards*uint32(sn.Shard))
+	return hash(math.MaxUint32 / NShards * uint32(sn.Shard))
 	//return hash(math.MaxUint32/uint32(NShards)/2*uint32(sn.Shard) + math.MaxUint32/2)
 	//return hash(math.MaxUint32/2 + uint32(sn.Shard))
 }
 
 func (sn ShardNode) GetKey() uint32 {
-	return math.MaxUint32/NShards*uint32(sn.Shard)
+	return math.MaxUint32 / NShards * uint32(sn.Shard)
 	//return math.MaxUint32/uint32(NShards)/2*uint32(sn.Shard) + math.MaxUint32/2
 	//return math.MaxUint32/2 + uint32(sn.Shard)
 }
 
 func (sn ShardNode) GetTypePoint() uint32 {
 	return 0
+}
+
+func (sn ShardNode) GetId() uint32 {
+	return uint32(sn.Shard)
 }
 
 type GroupNode struct {
@@ -97,6 +107,10 @@ func (gn GroupNode) GetKey() uint32 {
 
 func (gn GroupNode) GetTypePoint() uint32 {
 	return 1
+}
+
+func (gn GroupNode) GetId() uint32 {
+	return uint32(gn.Group)
 }
 
 type ConsistentHashing struct {
@@ -180,8 +194,12 @@ func (ch *ConsistentHashing) generate() *Config {
 		if ring[i].GetPos() != ring[j].GetPos() {
 			return ring[i].GetPos() < ring[j].GetPos()
 		}
-		raft.AssertF(ring[i].GetTypePoint() != ring[j].GetTypePoint(), "")
-		return ring[i].GetTypePoint() < ring[j].GetTypePoint()
+		if ring[i].GetTypePoint() != ring[j].GetTypePoint() {
+			return ring[i].GetTypePoint() < ring[j].GetTypePoint()
+		}
+		raft.AssertF(false, "") // should not see same type and same pos
+		raft.AssertF(ring[i].GetId() != ring[j].GetId(), "")
+		return ring[i].GetId() < ring[j].GetId()
 	})
 
 	conf := &Config{
